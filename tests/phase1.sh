@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 阶段 1（含 1.5）curl 验收：直连后端 vs 经过网关，覆盖放行/探针/契约/多网关绑定。
-# 前置：scripts/dev.sh up（94 项断言，全部通过才算过）
+# 前置：scripts/dev.sh up（100 项断言，全部通过才算过）
 set -uo pipefail
 
 # 本地测试永远不走代理
@@ -282,25 +282,33 @@ else
   ok "gateway_name 缺少契约来源被拒绝"
 fi
 
-sed 's/gateway_ttl      myrustwebdemo2 5;/gateway_ttl      myrustwebdemo2 0;/' "$BASE_CONF" >"$TMP/t-bad-ttl.conf"
+sed 's/gateway_url_ttl  myrustwebdemo2 5;/gateway_url_ttl  myrustwebdemo2 0;/' "$BASE_CONF" >"$TMP/t-bad-ttl.conf"
 if nginx_t "$TMP/t-bad-ttl.conf"; then
-  bad "非法 TTL 被拒绝" "nginx -t 竟然通过"
+  bad "非法 gateway_url_ttl 被拒绝" "nginx -t 竟然通过"
 else
-  ok "非法 TTL 被拒绝"
+  ok "非法 gateway_url_ttl 被拒绝"
 fi
 
-sed '/gateway_ttl      myrustwebdemo2/d' "$BASE_CONF" >"$TMP/t-default-ttl.conf"
+sed '/gateway_url_ttl  myrustwebdemo2/d' "$BASE_CONF" >"$TMP/t-default-ttl.conf"
 if nginx_t "$TMP/t-default-ttl.conf"; then
-  ok "省略 gateway_ttl 使用默认值"
+  ok "省略 gateway_url_ttl 使用默认值"
 else
-  bad "省略 gateway_ttl 使用默认值" "$(head -3 "$TMP/nginx-t.log")"
+  bad "省略 gateway_url_ttl 使用默认值" "$(head -3 "$TMP/nginx-t.log")"
 fi
 
-section "10. 契约文件模式（gateway_info_file，独立实例）"
+section "10. 契约文件模式（gateway_info_file，配置加载时读一次）"
 FILE_PREFIX="$TMP/filegw"
 FILE_GW="http://127.0.0.1:18099"
 mkdir -p "$FILE_PREFIX/conf" "$FILE_PREFIX/logs"
 file_nginx() { "$ROOT/nginx/sbin/nginx" -p "$FILE_PREFIX" -c conf/nginx.conf "$@"; }
+
+cat >"$FILE_PREFIX/conf/contract.json" <<'JSON'
+{
+  "protocol": 1,
+  "version": "file-mode-1",
+  "routes": [{ "path": "/api/health", "methods": ["GET"] }]
+}
+JSON
 
 cat >"$FILE_PREFIX/conf/nginx.conf" <<EOF
 worker_processes 1;
@@ -312,7 +320,6 @@ http {
     access_log off;
     gateway_name filegw;
     gateway_info_file filegw conf/contract.json;
-    gateway_ttl filegw 1;
     server {
         listen 127.0.0.1:18099;
         location / {
@@ -335,27 +342,8 @@ else
   bad "文件模式实例启动" "$(head -3 "$TMP/nginx-t-file.log")"
 fi
 
-# 文件还没写：fail-closed（503），不能放行
-sleep 0.5
 req GET "$FILE_GW/api/health"
-expect_code "契约文件还没写：fail-closed 503" 503
-head_has "  标记原因" 'x-gateway-reason: contract-not-ready'
-
-cat >"$FILE_PREFIX/conf/contract.json" <<'JSON'
-{
-  "protocol": 1,
-  "version": "file-mode-1",
-  "routes": [{ "path": "/api/health", "methods": ["GET"] }]
-}
-JSON
-
-# 等契约首次加载完成（TTL=1）
-for _ in $(seq 1 50); do
-  req GET "$FILE_GW/api/health"
-  [ "$CODE" = "200" ] && break
-  sleep 0.1
-done
-expect_code "文件模式：声明过的路由放行" 200
+expect_code "配置加载即生效：声明过的路由放行" 200
 head_has "  请求确实到达后端" 'x-demo-backend: 1'
 
 req GET "$FILE_GW/api/user/99"
@@ -367,7 +355,7 @@ req POST "$FILE_GW/api/health"
 expect_code "文件模式：方法不符 405" 405
 head_has "  Allow 头" 'allow: GET'
 
-# 改写文件 → TTL 内生效（不 reload nginx）
+# 只改文件、不 reload：不应有任何变化（没有 TTL 轮询）
 cat >"$FILE_PREFIX/conf/contract.json" <<'JSON'
 {
   "protocol": 1,
@@ -375,24 +363,56 @@ cat >"$FILE_PREFIX/conf/contract.json" <<'JSON'
   "routes": [{ "path": "/api/user/{id}", "methods": ["GET"] }]
 }
 JSON
+sleep 1
+req GET "$FILE_GW/api/health"
+expect_code "只改文件不 reload：旧契约继续生效" 200
+req GET "$FILE_GW/api/user/99"
+expect_code "只改文件不 reload：新路由未生效" 404
+
+# reload 后读取新文件
+file_nginx -s reload >/dev/null 2>&1
 for _ in $(seq 1 50); do
   req GET "$FILE_GW/api/user/99"
   [ "$CODE" = "200" ] && break
   sleep 0.1
 done
-expect_code "文件改动后新路由生效" 200
+expect_code "reload 后新契约生效" 200
 req GET "$FILE_GW/api/health"
-expect_code "文件改动后旧路由失效" 404
+expect_code "reload 后旧路由失效" 404
 
-# 坏文件不能把线上打成 503：保留上一份成功契约
+# 坏 JSON：与 nginx.conf 一样拒绝本次配置，旧 worker 继续服务
 printf '{ "protocol": 1, "routes": [ ' >"$FILE_PREFIX/conf/contract.json"
-sleep 2
+if file_nginx -t >>"$TMP/nginx-t-file.log" 2>&1; then
+  bad "坏 JSON 被 nginx -t 拒绝" "nginx -t 竟然通过"
+else
+  ok "坏 JSON 被 nginx -t 拒绝"
+fi
+if grep -q 'contract file .* rejected' "$TMP/nginx-t-file.log"; then
+  ok "  错误信息说明契约被拒绝"
+else
+  bad "  错误信息说明契约被拒绝" "$(grep -m1 gateway "$TMP/nginx-t-file.log")"
+fi
+file_nginx -s reload >/dev/null 2>&1
+sleep 0.5
 req GET "$FILE_GW/api/user/99"
-expect_code "坏文件保留上一份成功契约" 200
+expect_code "reload 失败：旧 worker 继续用旧契约" 200
+
+# 文件缺失：同样拒绝配置
+rm -f "$FILE_PREFIX/conf/contract.json"
+if file_nginx -t >>"$TMP/nginx-t-file.log" 2>&1; then
+  bad "契约文件缺失被拒绝" "nginx -t 竟然通过"
+else
+  ok "契约文件缺失被拒绝"
+fi
+if grep -q 'cannot read contract file' "$TMP/nginx-t-file.log"; then
+  ok "  错误信息说明读不到文件"
+else
+  bad "  错误信息说明读不到文件" "$(grep -m1 gateway "$TMP/nginx-t-file.log")"
+fi
 
 file_nginx -s stop >/dev/null 2>&1
 
-section "11. 契约来源互斥（nginx -t）"
+section "11. 契约来源与指令互斥（nginx -t）"
 sed "s|gateway_info_url myrustwebdemo2 http://127.0.0.1:9000/info_v2;|&\n    gateway_info_file myrustwebdemo2 $TMP/contract-both.json;|" \
   "$BASE_CONF" >"$TMP/t-both.conf"
 if nginx_t "$TMP/t-both.conf"; then
@@ -404,6 +424,23 @@ if grep -q 'already has a contract source' "$TMP/nginx-t.log"; then
   ok "  错误信息说明来源互斥"
 else
   bad "  错误信息说明来源互斥" "$(head -3 "$TMP/nginx-t.log")"
+fi
+
+# 文件来源不允许 gateway_url_ttl（它只管 URL 刷新）
+cat >"$FILE_PREFIX/conf/contract.json" <<'JSON'
+{ "protocol": 1, "routes": [{ "path": "/api/health", "methods": ["GET"] }] }
+JSON
+sed 's|gateway_info_file filegw conf/contract.json;|&\n    gateway_url_ttl filegw 2;|' \
+  "$FILE_PREFIX/conf/nginx.conf" >"$FILE_PREFIX/conf/ttl.conf"
+if file_nginx -c conf/ttl.conf -t >"$TMP/nginx-t-ttl.log" 2>&1; then
+  bad "文件来源写 gateway_url_ttl 被拒绝" "nginx -t 竟然通过"
+else
+  ok "文件来源写 gateway_url_ttl 被拒绝"
+fi
+if grep -q 'only applies to' "$TMP/nginx-t-ttl.log"; then
+  ok "  错误信息说明 TTL 只对 URL 生效"
+else
+  bad "  错误信息说明 TTL 只对 URL 生效" "$(head -3 "$TMP/nginx-t-ttl.log")"
 fi
 
 printf '\n\033[1m结果：%d 通过，%d 失败\033[0m\n' "$PASS" "$FAIL"

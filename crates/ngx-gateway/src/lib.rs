@@ -3,17 +3,19 @@
 //! 职责边界：
 //! - 本文件只负责「取配置 → 组装 RequestCtx → 调 gateway-core → 写响应」；
 //! - 路由/方法判定全部在 `gateway-core`，可用 `cargo test` 覆盖；
-//! - 契约由**后台线程**按 TTL 拉取，access 阶段只读内存快照，不做网络 I/O。
+//! - URL 契约由**后台线程**按 `gateway_url_ttl` 拉取；文件契约在**配置加载时**读一次
+//!   （与 `nginx.conf` 同样的读取时机，改文件要 `nginx -s reload`）；
+//! - access 阶段只读内存快照，不做网络/磁盘 I/O。
 //!
 //! 配置形态（http 级定义多个具名网关，location 按名字绑定）：
 //! ```nginx
 //! http {
 //!     gateway_name      myrustwebdemo1;
 //!     gateway_info_url  myrustwebdemo1 http://127.0.0.1:9000/info;
-//!     gateway_ttl       myrustwebdemo1 3;      # 可选，默认 60
+//!     gateway_url_ttl   myrustwebdemo1 3;      # 可选，默认 60（仅 URL 来源）
 //!
 //!     gateway_name      myrustwebdemo2;
-//!     gateway_info_file myrustwebdemo2 conf/contracts/info_v2.json;  # 也可用本地文件
+//!     gateway_info_file myrustwebdemo2 conf/contracts/info_v2.json;  # 改完要 reload
 //!
 //!     server {
 //!         location / {
@@ -28,7 +30,8 @@
 //! `gateway_info_file`（本地文件）。文件模式是为了"规则不能由被保护的后端改写"：
 //! URL 模式下后端一旦被拿下，攻击者可以改自己的 `/info` 返回值，等于改网关规则；
 //! 文件模式把规则放在 nginx 侧、由发布流程写入，后端进程不应有写权限。
-//! 详见 `docs/PROTOCOL.md` 第 1.1 节。
+//! 文件读不到或 JSON 非法时**拒绝本次配置**（`nginx -t`/reload 失败，旧 worker 继续跑），
+//! 不会带着空规则上线。详见 `docs/PROTOCOL.md` 第 1.1 / 1.2 节。
 //!
 //! 判定顺序：日志 → 内置探针（403/503）→ 每个绑定的网关依次判定（404/405/503）→ 放行。
 //! 一个 location 绑定多个网关时是「与」语义：任一网关拒绝即拒绝。
@@ -46,7 +49,7 @@ use gateway_core::{Decision, Gateway, RequestCtx};
 use ngx::core::Status;
 use ngx::ffi::{
     NGX_CONF_TAKE1, NGX_CONF_TAKE2, NGX_HTTP_LOC_CONF, NGX_HTTP_LOC_CONF_OFFSET,
-    NGX_HTTP_MAIN_CONF, NGX_HTTP_MODULE, NGX_LOG_EMERG, NGX_LOG_NOTICE, NGX_LOG_WARN, ngx_command_t,
+    NGX_HTTP_MAIN_CONF, NGX_HTTP_MODULE, NGX_LOG_EMERG, NGX_LOG_NOTICE, ngx_command_t,
     ngx_conf_t, ngx_cycle_t, ngx_http_module_t, ngx_int_t, ngx_module_t, ngx_str_t,
 };
 use ngx::http::{
@@ -59,14 +62,15 @@ use ngx::{ngx_conf_log_error, ngx_log_error, ngx_string};
 // ---------------------------------------------------------------------------
 
 /// 一条网关定义，对应 http 块里的一组 `gateway_name` / `gateway_info_url`|`gateway_info_file` /
-/// `gateway_ttl`。
+/// `gateway_url_ttl`。
 #[derive(Clone, Debug)]
 struct GatewayDef {
     name: String,
     /// 契约来源；`None` 表示配置还没给（postconfiguration 会拒绝）。
     source: Option<InfoSource>,
-    /// 未写 `gateway_ttl` 时为 None，启动刷新线程时按默认 60s。
-    ttl: Option<u64>,
+    /// 仅 URL 来源有效：未写 `gateway_url_ttl` 时为 None，启动刷新线程时按默认 60s。
+    /// 文件来源在配置加载时读取，没有刷新周期，写这个指令会被拒绝。
+    url_ttl: Option<u64>,
 }
 
 /// 契约来源。
@@ -179,85 +183,6 @@ fn refresh_loop_url(name: String, url: String, ttl: u64) {
     }
 }
 
-/// 文件模式的刷新循环。
-///
-/// 与 URL 模式的区别：不做网络请求，每个 TTL 只 `stat` 一次；mtime/长度/inode 变化时才重新读取
-/// 并解析。文件被删除或内容非法时**保留上一份成功契约**（last-known-good），不会因为发布过程
-/// 中的半截文件把线上打成 503。
-fn refresh_loop_file(name: String, path: String, ttl: u64) {
-    let mut last_message: Option<String> = None;
-    let mut last_stamp: Option<FileStamp> = None;
-
-    while !STOP_REFRESH.load(Ordering::Relaxed) {
-        let message = match std::fs::metadata(&path) {
-            Err(err) => Some(format!("[{name}] contract file \"{path}\" unreadable: {err}")),
-            Ok(meta) => {
-                let stamp = FileStamp::of(&meta);
-                if last_stamp == Some(stamp) {
-                    // 文件没变，不读也不解析。
-                    None
-                } else {
-                    Some(match std::fs::read_to_string(&path) {
-                        Err(err) => format!("[{name}] contract file read failed: {err}"),
-                        Ok(body) => match Gateway::parse(&body) {
-                            Ok(gateway) => {
-                                let msg = format!(
-                                    "[{name}] contract loaded from file protocol={} version={} \
-                                     routes={} unmatched={}",
-                                    gateway.protocol(),
-                                    gateway.version().unwrap_or("-"),
-                                    gateway.route_count(),
-                                    if gateway.forward_unmatched() {
-                                        "forward"
-                                    } else {
-                                        "deny"
-                                    }
-                                );
-                                write(&SNAPSHOTS).insert(name.clone(), Arc::new(gateway));
-                                // 只有成功才记录指纹：坏文件会在每个 TTL 重试（日志已去重）。
-                                last_stamp = Some(stamp);
-                                msg
-                            }
-                            Err(err) => format!("[{name}] contract file rejected: {err}"),
-                        },
-                    })
-                }
-            }
-        };
-
-        if let Some(message) = message {
-            if last_message.as_deref() != Some(message.as_str()) {
-                push_log(message.clone());
-                last_message = Some(message);
-            }
-        }
-
-        sleep_interruptible(ttl);
-    }
-}
-
-/// 文件指纹（mtime + 长度 + inode）。用 inode 是为了识别"原子替换"：发布流程
-/// `mv new.json contract.json` 时 mtime 可能不变，但 inode 一定变。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct FileStamp {
-    mtime_sec: i64,
-    mtime_nsec: i64,
-    len: u64,
-    inode: u64,
-}
-
-impl FileStamp {
-    fn of(meta: &std::fs::Metadata) -> Self {
-        use std::os::unix::fs::MetadataExt;
-        Self {
-            mtime_sec: meta.mtime(),
-            mtime_nsec: meta.mtime_nsec(),
-            len: meta.len(),
-            inode: meta.ino(),
-        }
-    }
-}
-
 /// 可被 worker 退出打断的 sleep：避免 `exit_process` 里 join 卡满一个 TTL。
 fn sleep_interruptible(ttl: u64) {
     let deadline = Instant::now() + Duration::from_secs(ttl);
@@ -297,16 +222,16 @@ unsafe extern "C" fn ngx_http_my_gateway_init_process(_cycle: *mut ngx_cycle_t) 
             push_log(format!("[{}] no contract source, skip", def.name));
             continue;
         };
-        let ttl = def.ttl.unwrap_or(60).max(1);
-        let thread_name = def.name.clone();
-        let spawn = match source {
-            InfoSource::Url(url) => std::thread::Builder::new()
-                .name(format!("my-gateway-{thread_name}"))
-                .spawn(move || refresh_loop_url(thread_name, url, ttl)),
-            InfoSource::File(path) => std::thread::Builder::new()
-                .name(format!("my-gateway-{thread_name}"))
-                .spawn(move || refresh_loop_file(thread_name, path, ttl)),
+        // 文件契约在 master 解析配置时已经读完，worker 通过 fork 继承快照；
+        // 没有刷新周期，改文件后要 `nginx -s reload`。
+        let InfoSource::Url(url) = source else {
+            continue;
         };
+        let ttl = def.url_ttl.unwrap_or(60).max(1);
+        let thread_name = def.name.clone();
+        let spawn = std::thread::Builder::new()
+            .name(format!("my-gateway-{thread_name}"))
+            .spawn(move || refresh_loop_url(thread_name, url, ttl));
 
         match spawn {
             Ok(handle) => handles.push(handle),
@@ -370,22 +295,64 @@ impl http::HttpModule for Module {
                     );
                     return Status::NGX_ERROR.into();
                 }
+                Some(InfoSource::Url(_)) => {}
                 Some(InfoSource::File(path)) => {
-                    // 启动时读不到只警告、不拒绝启动：fail-closed 的 503 已经足够安全，
-                    // 而且文件可能在 nginx 启动后才由发布流程写入（或 `nginx -t` 与 worker 用户不同）。
-                    if let Err(err) = std::fs::read_to_string(path) {
+                    if def.url_ttl.is_some() {
                         ngx_conf_log_error!(
-                            NGX_LOG_WARN,
+                            NGX_LOG_EMERG,
                             cf,
-                            "gateway \"{}\" contract file \"{}\" is not readable yet ({}); \
-                             requests stay 503 until it loads",
-                            def.name,
-                            path,
-                            err
+                            "gateway \"{}\" uses `gateway_info_file`; `gateway_url_ttl` only applies \
+                             to `gateway_info_url` (file contracts are read at config load / reload)",
+                            def.name
                         );
+                        return Status::NGX_ERROR.into();
+                    }
+
+                    // 与 nginx.conf 同样的语义：配置加载时读一次，读不到/解析失败就拒绝本次配置。
+                    // reload 失败时 master 保留旧 worker，线上继续用旧契约。
+                    let body = match std::fs::read_to_string(path) {
+                        Ok(body) => body,
+                        Err(err) => {
+                            ngx_conf_log_error!(
+                                NGX_LOG_EMERG,
+                                cf,
+                                "gateway \"{}\" cannot read contract file \"{}\": {}",
+                                def.name,
+                                path,
+                                err
+                            );
+                            return Status::NGX_ERROR.into();
+                        }
+                    };
+
+                    match Gateway::parse(&body) {
+                        Ok(gateway) => {
+                            ngx_conf_log_error!(
+                                NGX_LOG_NOTICE,
+                                cf,
+                                "gateway \"{}\" contract loaded from file protocol={} version={} \
+                                 routes={} unmatched={}",
+                                def.name,
+                                gateway.protocol(),
+                                gateway.version().unwrap_or("-"),
+                                gateway.route_count(),
+                                if gateway.forward_unmatched() { "forward" } else { "deny" }
+                            );
+                            write(&SNAPSHOTS).insert(def.name.clone(), Arc::new(gateway));
+                        }
+                        Err(err) => {
+                            ngx_conf_log_error!(
+                                NGX_LOG_EMERG,
+                                cf,
+                                "gateway \"{}\" contract file \"{}\" rejected: {}",
+                                def.name,
+                                path,
+                                err
+                            );
+                            return Status::NGX_ERROR.into();
+                        }
                     }
                 }
-                Some(InfoSource::Url(_)) => {}
             }
         }
         drop(defs);
@@ -444,9 +411,9 @@ static mut NGX_HTTP_MY_GATEWAY_COMMANDS: [ngx_command_t; 6] = [
         post: ptr::null_mut(),
     },
     ngx_command_t {
-        name: ngx_string!("gateway_ttl"),
+        name: ngx_string!("gateway_url_ttl"),
         type_: NGX_HTTP_MAIN_CONF | NGX_CONF_TAKE2,
-        set: Some(ngx_http_my_gateway_set_ttl),
+        set: Some(ngx_http_my_gateway_set_url_ttl),
         conf: 0,
         offset: 0,
         post: ptr::null_mut(),
@@ -704,7 +671,7 @@ extern "C" fn ngx_http_my_gateway_set_name(
         defs.push(GatewayDef {
             name: name.to_string(),
             source: None,
-            ttl: None,
+            url_ttl: None,
         });
     }
 
@@ -835,8 +802,8 @@ fn resolve_conf_path(cf: *mut ngx_conf_t, path: &str) -> String {
     }
 }
 
-/// `gateway_ttl <name> <seconds>;` —— 可选，默认 60。
-extern "C" fn ngx_http_my_gateway_set_ttl(
+/// `gateway_url_ttl <name> <seconds>;` —— 可选，默认 60，只对 `gateway_info_url` 生效。
+extern "C" fn ngx_http_my_gateway_set_url_ttl(
     cf: *mut ngx_conf_t,
     _cmd: *mut ngx_command_t,
     _conf: *mut c_void,
@@ -848,7 +815,7 @@ extern "C" fn ngx_http_my_gateway_set_ttl(
             ngx_conf_log_error!(
                 NGX_LOG_EMERG,
                 cf,
-                "`gateway_ttl` arguments are not valid UTF-8"
+                "`gateway_url_ttl` arguments are not valid UTF-8"
             );
             return ngx::core::NGX_CONF_ERROR;
         };
@@ -859,7 +826,7 @@ extern "C" fn ngx_http_my_gateway_set_ttl(
                 ngx_conf_log_error!(
                     NGX_LOG_EMERG,
                     cf,
-                    "`gateway_ttl {}` must be an integer in 1..=86400, got \"{}\"",
+                    "`gateway_url_ttl {}` must be an integer in 1..=86400, got \"{}\"",
                     name,
                     val
                 );
@@ -879,12 +846,17 @@ extern "C" fn ngx_http_my_gateway_set_ttl(
             return ngx::core::NGX_CONF_ERROR;
         };
 
-        if def.ttl.is_some() {
-            ngx_conf_log_error!(NGX_LOG_EMERG, cf, "duplicate `gateway_ttl {}`", name);
+        if def.url_ttl.is_some() {
+            ngx_conf_log_error!(
+                NGX_LOG_EMERG,
+                cf,
+                "duplicate `gateway_url_ttl {}`",
+                name
+            );
             return ngx::core::NGX_CONF_ERROR;
         }
 
-        def.ttl = Some(ttl);
+        def.url_ttl = Some(ttl);
     }
 
     ngx::core::NGX_CONF_OK

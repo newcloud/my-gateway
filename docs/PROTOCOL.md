@@ -34,16 +34,16 @@
 每个网关**必须且只能**有一个契约来源：`gateway_info_url`（HTTP 拉取）或 `gateway_info_file`
 （本地文件）。两者取哪个是**信任模型的选择**，不只是部署方便与否，见 1.1。
 
-| 项 | 约定 |
-| --- | --- |
-| 来源（URL） | `gateway_info_url <网关名> <url>`，必须是 `http://` 或 `https://`（当前构建只启用明文 HTTP，写 `https://` 会持续拉取失败 → 503） |
-| 来源（文件） | `gateway_info_file <网关名> <path>`，绝对路径或相对 nginx prefix（`-p`）的路径；`nginx -t` 检查来源唯一，但文件读不到只 warning |
-| 方法 | URL 方式为 `GET`；文件方式直接读本地文件 |
-| 成功响应 | `200` + JSON 对象；建议 `Content-Type: application/json`。文件方式为 UTF-8 JSON |
-| 超时 | 插件单次 HTTP 请求 3s（`timeout_global`）；文件方式无网络 |
-| 刷新 | 每个被 location 引用的网关、每个 worker 一个后台线程，按该网关的 `gateway_ttl` 秒循环：URL 重新拉取；文件只 `stat`，mtime/长度/inode 变化才重读。**成功才替换**自己的快照 |
-| 失败处理 | 保留该网关上一份成功契约（last-known-good）；从未成功过则该网关的绑定请求 `503 contract-not-ready` |
-| 日志去重 | 成功/失败的同一消息只在状态变化时写一条 `error_log`（带网关名前缀） |
+| 项 | `gateway_info_url`（HTTP） | `gateway_info_file`（本地文件） |
+| --- | --- | --- |
+| 指令 | `gateway_info_url <网关名> <url>`，必须是 `http://` 或 `https://`（当前构建只启用明文 HTTP，写 `https://` 会持续拉取失败 → 503） | `gateway_info_file <网关名> <path>`，绝对路径或相对 nginx prefix（`-p`）的路径 |
+| 方法 | `GET` | 直接读本地文件（UTF-8 JSON） |
+| 成功条件 | `200` + JSON 对象；建议 `Content-Type: application/json` | 文件可读且 JSON 合法 |
+| 超时 | 单次 HTTP 请求 3s（`timeout_global`） | 无网络 |
+| 读取时机 | **每个 worker 一个后台线程**，按该网关的 `gateway_url_ttl` 秒（默认 60）循环拉取，**成功才替换**快照 | **配置加载时读一次**（`nginx -t` / 启动 / `nginx -s reload`），与 `nginx.conf` 自身完全一致；没有 TTL，改文件必须 reload |
+| 失败处理 | 保留上一份成功契约（last-known-good）；从未成功过则绑定请求 `503 contract-not-ready` | **拒绝本次配置**（`NGX_LOG_EMERG`）：启动失败，reload 失败则旧 worker 继续用旧契约 |
+| 日志 | 成功/失败同一消息只在状态变化时写一条（带网关名前缀） | 加载成功记一条 `contract loaded from file ...`；失败直接进配置错误 |
+| TTL 指令 | `gateway_url_ttl <网关名> <秒>`，1..=86400，默认 60 | **不允许写**（写了 `nginx -t` 拒绝：`only applies to gateway_info_url`） |
 
 ### 1.1 为什么要有文件模式（安全原因，别忽略）
 
@@ -64,7 +64,8 @@ URL 模式的隐含前提是「**后端说的就是规则**」。后端一旦被
 | `gateway_info_url` | **后端进程**（以及任何能劫持这条 HTTP 的人） | 契约由服务自己生成、与网关同属一个信任域 |
 | `gateway_info_file` | **只有能写这个文件的人**（发布流程 / 运维 / root） | 不允许后端决定网关规则；等保、金融、多租户等要求"规则与被保护对象分离"的场景 |
 
-代价：规则变更要走发布流程（写文件，等 TTL 或 `nginx -s reload`），不再能"后端一改就生效"。
+代价：规则变更要走发布流程（写文件 + `nginx -s reload`），不再能"后端一改就生效"。
+这也正是文件模式的**好处**：任何规则变化都会在 `error_log` 留下一次配置加载记录，可审计。
 
 ### 1.2 使用文件模式时必须注意（开发/运维清单）
 
@@ -72,18 +73,24 @@ URL 模式的隐含前提是「**后端说的就是规则**」。后端一旦被
    `chown root:<nginx 运行用户> contract.json && chmod 0640`，所在目录也不能被后端用户写。
    如果后端和 nginx 跑在同一用户下（本仓库 dev 模式就是），文件模式**不提供任何隔离**，
    只是验证了"从文件读契约"这条路径。
-2. **原子替换发布。** 先写临时文件，再 `mv` 到目标路径（同目录、同文件系统）。
-   直接 `>` 截断写入会出现"半截 JSON"窗口；插件会拒绝坏文件并保留旧契约，但不要依赖这个兜底。
+2. **原子替换发布。** 先写临时文件，再 `mv` 到目标路径（同目录、同文件系统），然后
+   `nginx -t && nginx -s reload`。直接 `>` 截断写入会留下"半截 JSON"窗口——现在这个窗口
+   不会让线上放行，但会让 reload 失败（见第 4 条）。
 3. **路径规则**：绝对路径，或相对 **nginx prefix**（`-p`，默认编译 prefix）的路径，例如
    `conf/contracts/web.json`。注意不是相对 conf 文件所在目录（那是 `include` 的规则）。
-4. **TTL 含义不同**：URL 模式是"拉取间隔"；文件模式是"检查变化的间隔"（每轮只 `stat`，
-   变了才读取解析），所以文件模式可以把 `gateway_ttl` 设小一些，成本很低。
-5. **启动时文件不存在不阻止 nginx 启动**，只写一条 warning，绑定的 location 返回
-   `503 contract-not-ready`（fail-closed）。这样发布顺序（先起 nginx 后放契约）不会把站点配置卡死。
-6. **一个网关不能同时配两种来源**，`nginx -t` 会拒绝（报 `already has a contract source`）。
-7. **两者可以在同一份配置里混用**：A 网关走 URL、B 网关走文件，各自独立刷新、互不影响。
-8. **文件内容是同一份协议 v1 JSON**，没有额外包装；`ttl` 字段在文件模式下同样被
-   `gateway_ttl` 覆盖。
+4. **没有 TTL，改文件必须 reload。** 文件在**配置加载时**读一次（`nginx -t` / 启动 / reload），
+   与 `nginx.conf` 的读取方式完全一样。好处是语义简单、规则变化可审计；代价是改完不 reload 不生效。
+5. **读不到或 JSON 非法 → 拒绝本次配置**（`NGX_LOG_EMERG`）：
+   - 启动时：nginx 起不来（不会带着空规则上线）；
+   - reload 时：新配置被丢弃，**旧 worker 继续用旧契约**，线上不受影响。
+   这跟写错 `nginx.conf` 的后果一致，符合"契约 = 配置"的定位。
+6. **不要给文件来源写 `gateway_url_ttl`**，`nginx -t` 会拒绝
+   （`only applies to gateway_info_url`）。文件名里的 TTL 没有意义。
+7. **一个网关不能同时配两种来源**，`nginx -t` 会拒绝（报 `already has a contract source`）。
+8. **两者可以在同一份配置里混用**：A 网关走 URL（按 TTL 自动刷新）、B 网关走文件
+   （reload 生效），各自独立。
+9. **文件内容是同一份协议 v1 JSON**，没有额外包装；顶层 `ttl` 字段在文件模式下被忽略
+   （它只是给 URL 模式的建议值，且实际以 `gateway_url_ttl` 为准）。
 
 `/info` 本身也应出现在 `routes` 里（后端自查用），是否放行由契约决定。
 
@@ -112,7 +119,7 @@ demo_server 同时提供 `/info`（`version: phase1-fixed`，默认 `deny`）与
 | --- | --- | --- | --- | --- |
 | `protocol` | int | 否 | `1` | 不支持的版本 → 拒绝契约 |
 | `version` | string | 否 | — | 内容修订号，仅进日志 |
-| `ttl` | int（秒） | 否 | — | 建议刷新周期，当前被该网关的 `gateway_ttl` 覆盖 |
+| `ttl` | int（秒） | 否 | — | 建议刷新周期；URL 模式被该网关的 `gateway_url_ttl` 覆盖，文件模式忽略 |
 | `meta` | object | 否 | — | 自由信息，插件忽略 |
 | `unmatched` | string | 否 | `"deny"` | 未声明路由策略：`deny` / `forward`，见 2.1 |
 | `routes` | array | 是 | `[]` | 路由声明，见第 3 节 |

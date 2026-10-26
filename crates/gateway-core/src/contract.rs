@@ -37,7 +37,7 @@ pub struct Contract {
     /// 内容修订号，仅用于日志/排查，不参与解析。
     #[serde(default)]
     pub version: Option<String>,
-    /// 建议刷新周期（秒）；当前实现以 nginx `gateway_ttl` 为准。
+    /// 建议刷新周期（秒）；URL 来源的实现以 nginx `gateway_url_ttl` 为准，文件来源忽略。
     #[serde(default)]
     pub ttl: Option<u64>,
     /// 自由信息，插件必须忽略。字段名加 `_` 前缀表示"只解析不使用"，

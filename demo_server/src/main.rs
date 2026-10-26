@@ -74,7 +74,7 @@ async fn log_requests(req: Request, next: Next) -> Response {
 // ---------------------------------------------------------------------------
 
 /// 协议 v1（见 docs/PROTOCOL.md）：契约目前写死，后续改成由真实路由生成。
-/// `protocol` 决定解析规则，`version` 只是内容修订号，`ttl` 是建议值（被 nginx `gateway_ttl` 覆盖）。
+/// `protocol` 决定解析规则，`version` 只是内容修订号，`ttl` 是建议值（被 nginx `gateway_url_ttl` 覆盖）。
 async fn info() -> Json<Value> {
     Json(json!({
         "protocol": 1,
