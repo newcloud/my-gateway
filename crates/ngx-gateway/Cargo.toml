@@ -1,0 +1,23 @@
+[package]
+name = "my-gateway"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[lib]
+name = "my_gateway"
+crate-type = ["cdylib"]
+
+[dependencies]
+gateway-core = { path = "../gateway-core" }
+# 必须锁死 rev：crates.io 上的 0.5.x 没有 HttpRequestHandler / add_phase_handler，
+# 这套 API 目前只在 git main 上。升级时先看 examples/*.rs 的 diff。
+ngx = { git = "https://github.com/nginx/ngx-rust", rev = "15719544cfaf4322d602b0a8c2a8f85252ac6559", default-features = false, features = ["std"] }
+nginx-sys = { git = "https://github.com/nginx/ngx-rust", rev = "15719544cfaf4322d602b0a8c2a8f85252ac6559" }
+# 只要明文 HTTP，关掉 TLS/gzip，减少依赖与体积
+ureq = { version = "3", default-features = false }
+
+[features]
+# 以 cdylib 形式在 nginx 构建体系外编译时，需要导出 ngx_modules 表
+default = ["export-modules"]
+export-modules = []

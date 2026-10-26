@@ -1,0 +1,18 @@
+# 构建产物
+/target/
+/build/
+.build/
+
+# 本地编译的 nginx（scripts/build-nginx.sh 生成）与运行期文件
+/nginx/
+/.run/
+
+# 日志与 pid
+*.log
+*.pid
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+*.swp
+.DS_Store
