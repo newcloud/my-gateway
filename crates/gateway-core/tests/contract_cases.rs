@@ -53,6 +53,65 @@ fn rejects_undeclared_route() {
 }
 
 #[test]
+fn protocol_2_forwards_undeclared_route_when_configured() {
+    let g = Gateway::parse(
+        r#"{"protocol":2,"unmatched":"forward","routes":[
+            {"path":"/api/health","methods":["GET"]}
+        ]}"#,
+    )
+    .expect("protocol 2 forward contract should parse");
+
+    let out = g.check(&RequestCtx {
+        method: "GET",
+        path: "/api/admin/users",
+    });
+    assert_eq!(out.decision, Decision::Allow);
+    assert!(out.forwarded, "undeclared route should be forwarded");
+
+    // 已声明的路由照常判定：方法不符仍然是 405，不转发。
+    let out = g.check(&RequestCtx {
+        method: "POST",
+        path: "/api/health",
+    });
+    assert_eq!(out.decision, Decision::MethodNotAllowed);
+    assert!(!out.forwarded);
+}
+
+#[test]
+fn unmatched_defaults_to_deny() {
+    for contract in [
+        r#"{"protocol":2,"routes":[]}"#,
+        r#"{"protocol":2,"unmatched":"deny","routes":[]}"#,
+    ] {
+        let g = Gateway::parse(contract).expect("contract should parse");
+        let out = g.check(&RequestCtx {
+            method: "GET",
+            path: "/api/admin/users",
+        });
+        assert_eq!(out.decision, Decision::RouteNotDeclared);
+        assert!(!out.forwarded);
+    }
+}
+
+#[test]
+fn unmatched_requires_protocol_2() {
+    let err = Gateway::parse(r#"{"protocol":1,"unmatched":"forward","routes":[]}"#)
+        .expect_err("unmatched in a v1 contract must be rejected");
+    assert!(matches!(
+        err,
+        ContractError::UnknownField { ref scope, ref name }
+            if scope == "contract" && name == "unmatched"
+    ));
+}
+
+#[test]
+fn rejects_unknown_unmatched_value() {
+    let err = Gateway::parse(r#"{"protocol":2,"unmatched":"allow","routes":[]}"#)
+        .expect_err("unknown unmatched value must be rejected");
+    assert!(matches!(err, ContractError::Json(_)));
+}
+
+#[test]
 fn rejects_wrong_method_and_reports_allow() {
     let g = gw();
     let (decision, allow) = check(&g, "POST", "/api/health");
@@ -142,15 +201,15 @@ fn protocol_defaults_to_1_for_minimal_contract() {
 
 #[test]
 fn rejects_unsupported_protocol() {
-    let err = Gateway::parse(r#"{"protocol":2,"routes":[]}"#)
-        .expect_err("protocol 2 must be rejected by a v1 plugin");
+    let err = Gateway::parse(r#"{"protocol":3,"routes":[]}"#)
+        .expect_err("protocol 3 must be rejected");
     match err {
         ContractError::UnsupportedProtocol {
             protocol,
             supported,
         } => {
-            assert_eq!(protocol, 2);
-            assert_eq!(supported, 1);
+            assert_eq!(protocol, 3);
+            assert_eq!(supported, "1..=2");
         }
         other => panic!("expected UnsupportedProtocol, got {other:?}"),
     }

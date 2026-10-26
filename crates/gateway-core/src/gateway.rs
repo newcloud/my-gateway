@@ -4,7 +4,7 @@ use core::fmt;
 
 use matchit::Router;
 
-use crate::contract::{Contract, SUPPORTED_PROTOCOL};
+use crate::contract::{Contract, MIN_PROTOCOL, SUPPORTED_PROTOCOL, SUPPORTED_PROTOCOLS, Unmatched};
 
 /// 契约解析/编译错误。带上是第几条路由，方便定位后端上报的问题。
 #[derive(Debug)]
@@ -12,7 +12,8 @@ pub enum ContractError {
     Json(serde_json::Error),
     UnsupportedProtocol {
         protocol: u32,
-        supported: u32,
+        /// 支持的版本范围，例如 `1..=2`。
+        supported: &'static str,
     },
     UnknownField {
         scope: String,
@@ -82,6 +83,9 @@ pub struct Outcome<'a> {
     pub decision: Decision,
     /// 405 时回写 `Allow` 头。
     pub allow: Option<&'a str>,
+    /// 路径未声明，但契约要求转发给后端（`unmatched: "forward"`）。此时 `decision` 是 `Allow`，
+    /// 适配层只做日志、继续走 proxy，不写响应头。
+    pub forwarded: bool,
 }
 
 /// 请求上下文：只保留判定需要的东西，方便在测试里构造。
@@ -99,6 +103,7 @@ pub struct Gateway {
     version: Option<String>,
     ttl: Option<u64>,
     route_count: usize,
+    forward_unmatched: bool,
 }
 
 impl fmt::Debug for Gateway {
@@ -107,6 +112,7 @@ impl fmt::Debug for Gateway {
             .field("protocol", &self.protocol)
             .field("version", &self.version)
             .field("route_count", &self.route_count)
+            .field("forward_unmatched", &self.forward_unmatched)
             .finish_non_exhaustive()
     }
 }
@@ -118,10 +124,19 @@ impl Gateway {
     pub fn parse(json: &str) -> Result<Self, ContractError> {
         let contract: Contract = serde_json::from_str(json).map_err(ContractError::Json)?;
 
-        if contract.protocol != SUPPORTED_PROTOCOL {
+        if !(MIN_PROTOCOL..=SUPPORTED_PROTOCOL).contains(&contract.protocol) {
             return Err(ContractError::UnsupportedProtocol {
                 protocol: contract.protocol,
-                supported: SUPPORTED_PROTOCOL,
+                supported: SUPPORTED_PROTOCOLS,
+            });
+        }
+
+        // 新字段只在对应协议版本里生效：v1 契约写了 `unmatched` 仍按未知字段拒绝，
+        // 避免"后端以为打开了转发、插件其实按旧语义处理"。
+        if contract.unmatched.is_some() && contract.protocol < 2 {
+            return Err(ContractError::UnknownField {
+                scope: "contract".into(),
+                name: "unmatched".into(),
             });
         }
 
@@ -188,14 +203,25 @@ impl Gateway {
             version: contract.version,
             ttl: contract.ttl,
             route_count: contract.routes.len(),
+            forward_unmatched: contract.unmatched == Some(Unmatched::Forward),
         })
     }
 
     pub fn check(&self, ctx: &RequestCtx<'_>) -> Outcome<'_> {
         let Ok(matched) = self.router.at(ctx.path) else {
-            return Outcome {
-                decision: Decision::RouteNotDeclared,
-                allow: None,
+            // 未声明：默认拒绝；契约显式 `unmatched: "forward"` 时交给后端处理。
+            return if self.forward_unmatched {
+                Outcome {
+                    decision: Decision::Allow,
+                    allow: None,
+                    forwarded: true,
+                }
+            } else {
+                Outcome {
+                    decision: Decision::RouteNotDeclared,
+                    allow: None,
+                    forwarded: false,
+                }
             };
         };
 
@@ -210,11 +236,13 @@ impl Gateway {
             Outcome {
                 decision: Decision::Allow,
                 allow: None,
+                forwarded: false,
             }
         } else {
             Outcome {
                 decision: Decision::MethodNotAllowed,
                 allow: Some(allow_header.as_str()),
+                forwarded: false,
             }
         }
     }
@@ -233,5 +261,10 @@ impl Gateway {
 
     pub fn route_count(&self) -> usize {
         self.route_count
+    }
+
+    /// 未声明路由是否转发给后端（`unmatched: "forward"`）。
+    pub fn forward_unmatched(&self) -> bool {
+        self.forward_unmatched
     }
 }

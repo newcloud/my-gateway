@@ -125,10 +125,11 @@ fn refresh_loop(name: String, url: String, ttl: u64) {
         let message = match fetch_contract(&agent, &url) {
             Ok(gateway) => {
                 let msg = format!(
-                    "[{name}] contract loaded protocol={} version={} routes={}",
+                    "[{name}] contract loaded protocol={} version={} routes={} unmatched={}",
                     gateway.protocol(),
                     gateway.version().unwrap_or("-"),
-                    gateway.route_count()
+                    gateway.route_count(),
+                    if gateway.forward_unmatched() { "forward" } else { "deny" }
                 );
                 write(&SNAPSHOTS).insert(name.clone(), Arc::new(gateway));
                 msg
@@ -365,7 +366,11 @@ impl HttpRequestHandler for GatewayHandler {
 
         let method = request.method();
         let uri = request.unparsed_uri().to_str().unwrap_or("<non-utf8>");
-        let path = request.path().to_str().unwrap_or("/");
+        // 判定用**原始** request target 的 path，而不是 nginx 归一化后的 `$uri`：
+        // nginx 默认 `merge_slashes on`，会把 `//api/health` 归一成 `/api/health`，但
+        // `proxy_pass` 不带 URI 时上游收到的仍是原始的 `//api/health`。若按归一化结果判定，
+        // 就会出现"网关放行 /api/health、后端处理 //api/health"的不一致（路径混淆风险）。
+        let path = raw_path(uri);
 
         ngx_log_error!(
             NGX_LOG_NOTICE,
@@ -420,7 +425,18 @@ impl HttpRequestHandler for GatewayHandler {
 
             let outcome = gateway.check(&ctx);
             match outcome.decision {
-                Decision::Allow => {}
+                Decision::Allow => {
+                    if outcome.forwarded {
+                        ngx_log_error!(
+                            NGX_LOG_NOTICE,
+                            request.log(),
+                            "gateway: forward {} {} (route-not-declared, unmatched=forward) gateway={}",
+                            method,
+                            uri,
+                            name
+                        );
+                    }
+                }
                 Decision::RouteNotDeclared => {
                     ngx_log_error!(
                         NGX_LOG_NOTICE,
@@ -456,6 +472,28 @@ impl HttpRequestHandler for GatewayHandler {
 
         Status::NGX_DECLINED
     }
+}
+
+/// 从原始 request target 取出用于判定的 path。
+///
+/// - 去掉 `?query`（query 不参与路由判定）；
+/// - 兼容 absolute-form（`GET http://host/path HTTP/1.1`，代理场景）；
+/// - 空 path 按 `/` 处理。
+///
+/// 注意：**不合并** `//`、**不做**百分号解码——网关要判定的就是上游会收到的那个 path。
+/// nginx 的 `merge_slashes` 只影响 `$uri` 与 location 匹配，不影响这里。
+fn raw_path(uri: &str) -> &str {
+    let target = match uri.split_once("://") {
+        Some((scheme, rest))
+            if scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https") =>
+        {
+            rest.find('/').map_or("/", |idx| &rest[idx..])
+        }
+        _ => uri,
+    };
+
+    let path = target.split_once('?').map_or(target, |(path, _)| path);
+    if path.is_empty() { "/" } else { path }
 }
 
 /// 阶段 1 遗留的内置探针规则：只用于演示"未到后端就被拦"。

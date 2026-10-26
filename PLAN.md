@@ -54,7 +54,7 @@ my_gateway/
 │   └── src/main.rs
 ├── deploy/nginx.conf          # 运行时配置（构建脚本会拷到 nginx/conf/）
 ├── scripts/                   # build-nginx.sh / build-module.sh / dev.sh
-├── tests/phase1.sh            # curl 端到端验收（66 项）
+├── tests/phase1.sh            # curl 端到端验收（78 项）
 └── nginx/                     # 本地 nginx 前缀（构建产物）
 ```
 
@@ -255,7 +255,7 @@ pub enum Decision {
 | 阶段 | 产出 | 验收方式 | 状态 |
 | --- | --- | --- | --- |
 | 1 | 可加载的 .so + demo 后端 /info | curl 三态可见 | ✅ |
-| 1.5 | 契约真正生效（具名多网关 + TTL 拉取 + 404/405 + fail-closed） | `tests/phase1.sh` 66/66 | ✅ |
+| 1.5 | 契约真正生效（具名多网关 + TTL 拉取 + 404/405 + fail-closed） | `tests/phase1.sh` 78/78 | ✅ |
 | 2 | `gateway-core` + 测试骨架 | `cargo test` 全绿，无需 nginx | ✅（22 项） |
 | 3 | 方法校验 + 动态刷新 | 改后端契约即时生效，无需 reload | ✅（TTL 3s 验证） |
 | 4 | Radix 路由 + 契约 v1 | 扫描类请求 404，动态路由通过 | ✅（基础部分） |
@@ -279,7 +279,7 @@ pub enum Decision {
 ## 9. 下一步（当前状态）
 
 阶段 1–4 的目标已经具备可用 demo（Rust 模块 + 本地 nginx + demo 后端 + 契约拉取 + matchit 路由 +
-404/405/`Allow` + 冷启动 fail-closed + 具名多网关），验收 66 项全绿。接下来按顺序：
+404/405/`Allow` + 冷启动 fail-closed + 具名多网关），验收 78 项全绿。接下来按顺序：
 
 1. **阶段 5**：契约新增 `query` / `body` / `headers`，`RequestCtx` 带上对应数据，`Gateway::check`
    返回统一的 `400` + 具体原因；nginx 层负责有上限地读取请求体（只对已声明路由）。

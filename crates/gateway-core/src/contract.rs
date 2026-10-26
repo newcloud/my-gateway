@@ -11,11 +11,27 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
-/// 当前插件支持的协议版本。新增/改变判定语义的字段必须递增版本（见协议文档第 0 节）。
-pub const SUPPORTED_PROTOCOL: u32 = 1;
+/// 当前插件支持的最高协议版本。新增/改变判定语义的字段必须递增版本（见协议文档第 0 节）。
+///
+/// v1 → v2：新增顶层可选 `unmatched`（未声明路由策略），旧契约行为不变。
+pub const SUPPORTED_PROTOCOL: u32 = 2;
+/// 插件支持的协议范围，用于日志与错误信息。
+pub const SUPPORTED_PROTOCOLS: &str = "1..=2";
+/// 最低协议版本；省略 `protocol` 时按它处理（老契约语义不变）。
+pub const MIN_PROTOCOL: u32 = 1;
 
 fn default_protocol() -> u32 {
-    SUPPORTED_PROTOCOL
+    MIN_PROTOCOL
+}
+
+/// 未声明路由策略（protocol 2）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Unmatched {
+    /// 默认：网关直接 404，不转发。fail-closed。
+    Deny,
+    /// 交给后端处理（与命中路由一样放行）。仅迁移期/兼容旧客户端时使用。
+    Forward,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -33,6 +49,9 @@ pub struct Contract {
     /// 保留它是为了占住 `meta` 这个键，避免落进 `extra` 被当成未知字段。
     #[serde(default, rename = "meta")]
     pub _meta: Option<serde_json::Value>,
+    /// 未声明路由策略（protocol 2）：`deny`（默认）或 `forward`。见协议文档第 2.1 节。
+    #[serde(default)]
+    pub unmatched: Option<Unmatched>,
     #[serde(default)]
     pub routes: Vec<Route>,
     /// 顶层未定义字段。非空即整份拒绝。

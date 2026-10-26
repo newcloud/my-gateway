@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 阶段 1（含 1.5）curl 验收：直连后端 vs 经过网关，覆盖放行/探针/契约/多网关绑定。
-# 前置：scripts/dev.sh up（66 项断言，全部通过才算过）
+# 前置：scripts/dev.sh up（80 项断言，全部通过才算过）
 set -uo pipefail
 
 # 本地测试永远不走代理
@@ -50,6 +50,11 @@ body_lacks() {
 head_has() {
   local name="$1" needle="$2"
   if grep -qi -- "$needle" "$TMP/head"; then ok "$name"; else bad "$name" "响应头缺少 '$needle'：$(tr -d '\r' <"$TMP/head" | head -8)"; fi
+}
+
+head_lacks() {
+  local name="$1" needle="$2"
+  if grep -qi -- "$needle" "$TMP/head"; then bad "$name" "响应头不该包含 '$needle'"; else ok "$name"; fi
 }
 
 section "0. 连通性"
@@ -139,6 +144,26 @@ expect_code "动态路由方法不符 405" 405
 req GET "$GATEWAY/api/products/"
 expect_code "尾斜杠严格不匹配 404" 404
 
+# nginx 默认 merge_slashes on 会把 // 合并成 /，但上游收到的是原始路径；
+# 判定必须用原始路径，否则会出现"网关放行、后端处理另一条路径"的不一致。
+req GET "$GATEWAY//api/health"
+expect_code "重复斜杠按原始路径判定（不合并）" 404
+head_has "  标记原因" 'x-gateway-reason: route-not-declared'
+head_has "  标记拒绝的网关" 'x-gateway-name: myrustwebdemo1'
+body_lacks "  没有落到后端" 'not_found'
+
+req GET "$GATEWAY/api//health"
+expect_code "路径中间重复斜杠同样 404" 404
+
+req GET "$GATEWAY/api/health?verbose=1"
+expect_code "query 不参与路由匹配" 200
+
+if grep -q 'gateway: GET //api/health (path=//api/health' "$ROOT/nginx/logs/error.log" 2>/dev/null; then
+  ok "日志里的判定路径是原始路径"
+else
+  bad "日志里的判定路径是原始路径" "未找到 'gateway: GET //api/health (path=//api/health'"
+fi
+
 req GET "$GATEWAY/passthrough/api/admin/users"
 expect_code "未绑定网关时契约不生效" 200
 
@@ -164,23 +189,43 @@ req POST "$GATEWAY/info"
 expect_code "任一网关拒绝即拒绝" 405
 head_has "  标记第一个拒绝的网关" 'x-gateway-name: myrustwebdemo1'
 
-section "7. 两份契约的判定差异（同一后端，不同契约）"
+section "7. 未声明路由策略（v1=deny 默认，v2=forward）"
+# v2 显式 unmatched: "forward"：契约没声明的路径交给后端
 req GET "$GATEWAY/api/user/99"
-expect_code "v1 专属路径被 v2 判 404" 404
-head_has "  标记拒绝的网关是 v2" 'x-gateway-name: myrustwebdemo2'
-head_has "  原因是未声明" 'x-gateway-reason: route-not-declared'
-body_lacks "  没有落到后端" 'user-demo'
+expect_code "v2 未声明路由转发到后端" 200
+head_has "  响应来自后端" 'x-demo-backend: 1'
+head_lacks "  不是网关拒绝" 'x-gateway-reason'
+body_has "  后端返回真实数据" '"id":"99"'
 
 req GET "$BACKEND/api/user/99"
-expect_code "后端直连同一路径是 200（证明是网关拦的）" 200
-body_has "  后端确实有这个接口" '"id":"99"'
+expect_code "后端直连同一路径也是 200" 200
 
+# 转发只影响"未声明"；已声明路由的方法校验仍然严格
+req POST "$GATEWAY/api/metrics"
+expect_code "v2 已声明路由方法不符仍 405" 405
+head_has "  回写 Allow" 'allow: GET'
+head_has "  标记拒绝的网关" 'x-gateway-name: myrustwebdemo2'
+
+# v1 没写 unmatched → 默认 deny，行为与以前一致
 req GET "$GATEWAY/api/audit"
-expect_code "v2 专属路径被 v1 先判 404" 404
+expect_code "v1 未声明仍是 404（默认 deny）" 404
 head_has "  标记拒绝的网关是 v1" 'x-gateway-name: myrustwebdemo1'
+head_has "  标记原因" 'x-gateway-reason: route-not-declared'
 
 req GET "$GATEWAY/api/user/42"
-expect_code "v1 网关下同类路径仍放行" 200
+expect_code "v1 已声明路由照常放行" 200
+
+if grep -q 'gateway: forward GET /api/user/99 (route-not-declared, unmatched=forward) gateway=myrustwebdemo2' "$ROOT/nginx/logs/error.log" 2>/dev/null; then
+  ok "日志记录了转发行为"
+else
+  bad "日志记录了转发行为" "未找到 'gateway: forward GET /api/user/99 ... gateway=myrustwebdemo2'"
+fi
+
+if grep -q '\[myrustwebdemo2\] contract loaded protocol=2 version=phase1-v2 routes=8 unmatched=forward' "$ROOT/nginx/logs/error.log" 2>/dev/null; then
+  ok "日志记录了 v2 契约的未声明策略"
+else
+  bad "日志记录了 v2 契约的未声明策略" "未找到 protocol=2 ... unmatched=forward"
+fi
 
 section "8. 日志"
 if grep -q 'contract loaded protocol=1 version=phase1-fixed routes=8' "$ROOT/nginx/logs/error.log" 2>/dev/null; then
@@ -196,10 +241,10 @@ else
   bad "两个网关各自拉取契约" "error_log 缺少 myrustwebdemo1 / myrustwebdemo2 的 contract loaded"
 fi
 
-if grep -q '\[myrustwebdemo2\] contract loaded protocol=1 version=phase1-v2 routes=8' "$ROOT/nginx/logs/error.log" 2>/dev/null; then
+if grep -q '\[myrustwebdemo2\] contract loaded protocol=2 version=phase1-v2 routes=8 unmatched=forward' "$ROOT/nginx/logs/error.log" 2>/dev/null; then
   ok "demo2 拉到的是 /info_v2 的契约"
 else
-  bad "demo2 拉到的是 /info_v2 的契约" "未找到 '[myrustwebdemo2] contract loaded ... version=phase1-v2'"
+  bad "demo2 拉到的是 /info_v2 的契约" "未找到 '[myrustwebdemo2] contract loaded protocol=2 ... unmatched=forward'"
 fi
 
 if grep -q 'refresh started for 2 gateway(s)' "$ROOT/nginx/logs/error.log" 2>/dev/null; then

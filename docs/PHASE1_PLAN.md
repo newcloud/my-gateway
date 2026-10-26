@@ -7,7 +7,7 @@
 > 提前落地为**阶段 1.5**：http 级具名网关（`gateway_name` / `gateway_info_url <name> <url>` /
 > `gateway_ttl <name> <n>`）+ location `enable_gateway_by <name>` + 后台 TTL 拉取 + `gateway-core`
 > 判定（matchit 路由、404/405 + `Allow`）。本文第 1 节「不拉取契约」的非目标**已被 1.5 覆盖**，
-> 验收断言从 29 项增至 66 项；详见 [PROGRESS.md](PROGRESS.md) 第 2、3 节。
+> 验收断言从 29 项增至 78 项；详见 [PROGRESS.md](PROGRESS.md) 第 2、3 节。
 
 ## 1. 目标与非目标
 
@@ -63,7 +63,7 @@ my_gateway/
 │   ├── build-nginx.sh             # 下载/编译/安装本地 nginx
 │   ├── build-module.sh            # 编译 .so 并部署到 nginx/modules/
 │   └── dev.sh                     # up/down/restart/status/logs
-├── tests/phase1.sh                # curl 验收（66 项断言）
+├── tests/phase1.sh                # curl 验收（78 项断言）
 ├── nginx/                         # 构建产物：sbin/ conf/ modules/ logs/
 └── .build/                        # nginx 源码、本地 libclang（体积大，可随时重建）
 ```
@@ -82,13 +82,13 @@ my_gateway/
 | 6 | 内置探针拦截 | `.php` / `.env` / `.git*` / `/wp-*` → 403；`/__gateway/deny` → 503 |
 | 7 | demo_server + 固定契约 | 业务接口 + `GET /info`（8 条路由）；1.5 追加 `GET /info_v2` |
 | 8 | nginx 反代 + 对照 location | `/` 网关接管，`/passthrough/` 关闭网关 |
-| 9 | curl 验收脚本 | `tests/phase1.sh`，29 通过 / 0 失败（1.5 扩到 36 项，多网关后 49 项，双契约后 66 项） |
+| 9 | curl 验收脚本 | `tests/phase1.sh`，29 通过 / 0 失败（1.5 扩到 36 项，多网关后 49 项，双契约后 78 项） |
 | 10 | 进度与文档目录 | `docs/PROGRESS.md` |
 | 11 | **1.5**：抽 `gateway-core`，22 项单测 | `cargo test -p gateway-core` 全绿 |
 | 12 | **1.5**：具名网关 + 后台刷新线程 | 每个被引用的网关一个线程，日志 `[myrustwebdemo1] contract loaded ... routes=8` |
 | 13 | **1.5**：契约判定（404 / 405 + `Allow` / 503 未就绪） | `tests/phase1.sh` 扩到 36 项，全部通过 |
 | 14 | **1.5**：配置模型改为 http 级具名多网关 | `enable_gateway_by` + `X-Gateway-Name`；`tests/phase1.sh` 扩到 49 项 |
-| 15 | **1.5**：demo_server 第二份契约 `GET /info_v2` | `myrustwebdemo2` 指向 v2；新增 4 个差异对照 location；`tests/phase1.sh` 扩到 66 项 |
+| 15 | **1.5**：demo_server 第二份契约 `GET /info_v2` | `myrustwebdemo2` 指向 v2；新增 4 个差异对照 location；`tests/phase1.sh` 扩到 66 项，原始路径判定后 78 项 |
 
 ## 5. 关键设计取舍
 
@@ -122,7 +122,7 @@ my_gateway/
 ./scripts/build-nginx.sh      # 首次：下载并编译本地 nginx
 ./scripts/build-module.sh     # 编译 .so → nginx/modules/
 ./scripts/dev.sh up           # 起 demo_server(9000) + nginx(8080)
-./tests/phase1.sh             # 66 项断言
+./tests/phase1.sh             # 78 项断言
 ./scripts/dev.sh down
 ```
 
