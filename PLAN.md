@@ -54,7 +54,7 @@ my_gateway/
 │   └── src/main.rs
 ├── deploy/nginx.conf          # 运行时配置（构建脚本会拷到 nginx/conf/）
 ├── scripts/                   # build-nginx.sh / build-module.sh / dev.sh
-├── tests/phase1.sh            # curl 端到端验收（78 项）
+├── tests/phase1.sh            # curl 端到端验收（94 项）
 └── nginx/                     # 本地 nginx 前缀（构建产物）
 ```
 
@@ -75,7 +75,7 @@ my_gateway/
 1. 记录本机 nginx 版本、编译参数（`nginx -V`），确认 `--with-compat` 与 ngx-rust 支持范围。**这是全项目最大的不确定项，必须第一步做掉。**
 2. 用 ngx-rust 写出模块骨架：注册 access handler，打印 method + uri 到 error_log，固定返回 418 或原样放行（用 nginx 指令切换）。
 3. `mock-server` 提供一个写死的 `GET /info`，返回 2 条静态路由的 JSON。
-4. 配置 `nginx.conf`：`load_module` + http 级 `gateway_name` / `gateway_info_url <name> <url>` /
+4. 配置 `nginx.conf`：`load_module` + http 级 `gateway_name` / 契约来源（`gateway_info_url` 或 `gateway_info_file`） /
    `gateway_ttl <name> <n>`，location 里 `enable_gateway_by <name>`。
 5. 用 curl 验证：放行、拦截、error_log 三种可见结果。
 
@@ -173,6 +173,9 @@ pub enum Decision {
 > - 每个被引用的网关一个刷新线程（各自 TTL），未引用的定义不拉取；
 > - 启动不做同步拉取：未拿到第一份契约前返回 `503 contract-not-ready`（fail-closed 效果一致，且不阻塞 worker 启动）；
 > - 拉取失败保留 last-known-good 快照，日志只在状态变化时写一条，避免 TTL 小时刷屏；
+> - 契约来源二选一：`gateway_info_url`（HTTP）或 `gateway_info_file`（本地文件，每个 TTL 只 `stat`）。
+>   文件模式用于"不允许后端决定规则"的场景——URL 模式下后端被入侵即可改自己的 `/info`，
+>   等于改网关规则；文件模式把信任根移到文件权限，详见 `docs/PROTOCOL.md` 第 1.1 节；
 > - 后台线程不直接调 nginx logger，消息排队后由请求线程写 `error_log`。
 
 退出条件：
@@ -255,7 +258,7 @@ pub enum Decision {
 | 阶段 | 产出 | 验收方式 | 状态 |
 | --- | --- | --- | --- |
 | 1 | 可加载的 .so + demo 后端 /info | curl 三态可见 | ✅ |
-| 1.5 | 契约真正生效（具名多网关 + TTL 拉取 + 404/405 + fail-closed） | `tests/phase1.sh` 78/78 | ✅ |
+| 1.5 | 契约真正生效（具名多网关 + TTL 拉取/文件 + 404/405 + fail-closed） | `tests/phase1.sh` 94/94 | ✅ |
 | 2 | `gateway-core` + 测试骨架 | `cargo test` 全绿，无需 nginx | ✅（42 项） |
 | 3 | 方法校验 + 动态刷新 | 改后端契约即时生效，无需 reload | ✅（TTL 3s 验证） |
 | 4 | Radix 路由 + 契约 v1 | 扫描类请求 404，动态路由通过 | ✅（基础部分） |
@@ -279,7 +282,7 @@ pub enum Decision {
 ## 9. 下一步（当前状态）
 
 阶段 1–4 的目标已经具备可用 demo（Rust 模块 + 本地 nginx + demo 后端 + 契约拉取 + matchit 路由 +
-404/405/`Allow` + 冷启动 fail-closed + 具名多网关），验收 78 项全绿。接下来按顺序：
+404/405/`Allow` + 冷启动 fail-closed + 具名多网关 + 契约文件来源），验收 94 项全绿。接下来按顺序：
 
 1. **阶段 5**：契约新增 `query` / `body` / `headers`，`RequestCtx` 带上对应数据，`Gateway::check`
    返回统一的 `400` + 具体原因；nginx 层负责有上限地读取请求体（只对已声明路由）。

@@ -4,10 +4,11 @@
 > 状态：**已完成**（2026-10-26），验收结果见 [PROGRESS.md](PROGRESS.md)。
 >
 > 后续补充（2026-10-26）：阶段 1 完成后，用户要求 demo「真正读取并启用配置」，因此把阶段 3/4 的核心
-> 提前落地为**阶段 1.5**：http 级具名网关（`gateway_name` / `gateway_info_url <name> <url>` /
-> `gateway_ttl <name> <n>`）+ location `enable_gateway_by <name>` + 后台 TTL 拉取 + `gateway-core`
-> 判定（matchit 路由、404/405 + `Allow`）。本文第 1 节「不拉取契约」的非目标**已被 1.5 覆盖**，
-> 验收断言从 29 项增至 78 项；详见 [PROGRESS.md](PROGRESS.md) 第 2、3 节。
+> 提前落地为**阶段 1.5**：http 级具名网关（`gateway_name` / `gateway_info_url <name> <url>`
+> 或 `gateway_info_file <name> <path>` / `gateway_ttl <name> <n>`）+ location `enable_gateway_by <name>`
+> + 后台 TTL 拉取/文件检查 + `gateway-core` 判定（matchit 路由、404/405 + `Allow`）。本文第 1 节
+> 「不拉取契约」的非目标**已被 1.5 覆盖**，
+> 验收断言从 29 项增至 78 项（新增契约文件模式后 94 项）；详见 [PROGRESS.md](PROGRESS.md) 第 2、3 节。
 
 ## 1. 目标与非目标
 
@@ -63,7 +64,7 @@ my_gateway/
 │   ├── build-nginx.sh             # 下载/编译/安装本地 nginx
 │   ├── build-module.sh            # 编译 .so 并部署到 nginx/modules/
 │   └── dev.sh                     # up/down/restart/status/logs
-├── tests/phase1.sh                # curl 验收（78 项断言）
+├── tests/phase1.sh                # curl 验收（94 项断言）
 ├── nginx/                         # 构建产物：sbin/ conf/ modules/ logs/
 └── .build/                        # nginx 源码、本地 libclang（体积大，可随时重建）
 ```
@@ -82,7 +83,7 @@ my_gateway/
 | 6 | 内置探针拦截 | `.php` / `.env` / `.git*` / `/wp-*` → 403；`/__gateway/deny` → 503 |
 | 7 | demo_server + 固定契约 | 业务接口 + `GET /info`（8 条路由）；1.5 追加 `GET /info_v2` |
 | 8 | nginx 反代 + 对照 location | `/` 网关接管，`/passthrough/` 关闭网关 |
-| 9 | curl 验收脚本 | `tests/phase1.sh`，29 通过 / 0 失败（1.5 扩到 36 项，多网关后 49 项，双契约后 78 项） |
+| 9 | curl 验收脚本 | `tests/phase1.sh`，29 通过 / 0 失败（1.5 扩到 36 项，多网关后 49 项，双契约后 78 项，契约文件模式后 94 项） |
 | 10 | 进度与文档目录 | `docs/PROGRESS.md` |
 | 11 | **1.5**：抽 `gateway-core`，22 项单测 | `cargo test -p gateway-core` 全绿 |
 | 12 | **1.5**：具名网关 + 后台刷新线程 | 每个被引用的网关一个线程，日志 `[myrustwebdemo1] contract loaded ... routes=8` |
@@ -122,7 +123,7 @@ my_gateway/
 ./scripts/build-nginx.sh      # 首次：下载并编译本地 nginx
 ./scripts/build-module.sh     # 编译 .so → nginx/modules/
 ./scripts/dev.sh up           # 起 demo_server(9000) + nginx(8080)
-./tests/phase1.sh             # 78 项断言
+./tests/phase1.sh             # 94 项断言
 ./scripts/dev.sh down
 ```
 
@@ -159,7 +160,8 @@ curl -i http://127.0.0.1:8080/api/health   # 200（TTL 内自动恢复）
 - [x] `nginx -t` 通过，worker 启动无 panic；
 - [x] `curl` 能看到放行 / 403 / 404 / 405 / 503 / 透传六种响应；
 - [x] `error_log` 有插件日志，后端日志能证明被拦请求未到达；
-- [x] 契约由具名网关的 `gateway_info_url` 实际拉取（日志 `[<name>] contract loaded ...`），未就绪时 fail-closed；
+- [x] 契约由具名网关的 `gateway_info_url` 实际拉取（日志 `[<name>] contract loaded from url ...`），未就绪时 fail-closed；
+- [x] 契约也可由 `gateway_info_file` 从本地文件读取（文件模式，后端被入侵也改不了规则）；
 - [x] `tests/phase1.sh` 全绿，且脚本可重复执行；
 - [x] 全过程无 root、无手动改系统配置。
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 阶段 1（含 1.5）curl 验收：直连后端 vs 经过网关，覆盖放行/探针/契约/多网关绑定。
-# 前置：scripts/dev.sh up（78 项断言，全部通过才算过）
+# 前置：scripts/dev.sh up（94 项断言，全部通过才算过）
 set -uo pipefail
 
 # 本地测试永远不走代理
@@ -11,7 +11,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GATEWAY="${GATEWAY:-http://127.0.0.1:8080}"
 BACKEND="${BACKEND:-http://127.0.0.1:9000}"
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+trap 'if [ -f "$TMP/filegw/logs/nginx.pid" ]; then "$ROOT/nginx/sbin/nginx" -p "$TMP/filegw" -c conf/nginx.conf -s stop >/dev/null 2>&1; fi; rm -rf "$TMP"' EXIT
 
 PASS=0
 FAIL=0
@@ -277,9 +277,9 @@ fi
 
 sed '/gateway_info_url myrustwebdemo2/d' "$BASE_CONF" >"$TMP/t-no-url.conf"
 if nginx_t "$TMP/t-no-url.conf"; then
-  bad "gateway_name 缺少 info_url 被拒绝" "nginx -t 竟然通过"
+  bad "gateway_name 缺少契约来源被拒绝" "nginx -t 竟然通过"
 else
-  ok "gateway_name 缺少 info_url 被拒绝"
+  ok "gateway_name 缺少契约来源被拒绝"
 fi
 
 sed 's/gateway_ttl      myrustwebdemo2 5;/gateway_ttl      myrustwebdemo2 0;/' "$BASE_CONF" >"$TMP/t-bad-ttl.conf"
@@ -294,6 +294,116 @@ if nginx_t "$TMP/t-default-ttl.conf"; then
   ok "省略 gateway_ttl 使用默认值"
 else
   bad "省略 gateway_ttl 使用默认值" "$(head -3 "$TMP/nginx-t.log")"
+fi
+
+section "10. 契约文件模式（gateway_info_file，独立实例）"
+FILE_PREFIX="$TMP/filegw"
+FILE_GW="http://127.0.0.1:18099"
+mkdir -p "$FILE_PREFIX/conf" "$FILE_PREFIX/logs"
+file_nginx() { "$ROOT/nginx/sbin/nginx" -p "$FILE_PREFIX" -c conf/nginx.conf "$@"; }
+
+cat >"$FILE_PREFIX/conf/nginx.conf" <<EOF
+worker_processes 1;
+error_log logs/error.log notice;
+pid logs/nginx.pid;
+load_module $ROOT/nginx/modules/libmy_gateway.so;
+events { worker_connections 64; }
+http {
+    access_log off;
+    gateway_name filegw;
+    gateway_info_file filegw conf/contract.json;
+    gateway_ttl filegw 1;
+    server {
+        listen 127.0.0.1:18099;
+        location / {
+            enable_gateway_by filegw;
+            proxy_pass http://127.0.0.1:9000;
+        }
+    }
+}
+EOF
+
+if file_nginx -t >"$TMP/nginx-t-file.log" 2>&1; then
+  ok "gateway_info_file 配置可加载（相对路径按 prefix 解析）"
+else
+  bad "gateway_info_file 配置可加载（相对路径按 prefix 解析）" "$(head -3 "$TMP/nginx-t-file.log")"
+fi
+
+if file_nginx >>"$TMP/nginx-t-file.log" 2>&1; then
+  ok "文件模式实例启动"
+else
+  bad "文件模式实例启动" "$(head -3 "$TMP/nginx-t-file.log")"
+fi
+
+# 文件还没写：fail-closed（503），不能放行
+sleep 0.5
+req GET "$FILE_GW/api/health"
+expect_code "契约文件还没写：fail-closed 503" 503
+head_has "  标记原因" 'x-gateway-reason: contract-not-ready'
+
+cat >"$FILE_PREFIX/conf/contract.json" <<'JSON'
+{
+  "protocol": 1,
+  "version": "file-mode-1",
+  "routes": [{ "path": "/api/health", "methods": ["GET"] }]
+}
+JSON
+
+# 等契约首次加载完成（TTL=1）
+for _ in $(seq 1 50); do
+  req GET "$FILE_GW/api/health"
+  [ "$CODE" = "200" ] && break
+  sleep 0.1
+done
+expect_code "文件模式：声明过的路由放行" 200
+head_has "  请求确实到达后端" 'x-demo-backend: 1'
+
+req GET "$FILE_GW/api/user/99"
+expect_code "文件模式：未声明路由 404" 404
+head_has "  标记原因" 'x-gateway-reason: route-not-declared'
+head_has "  标记拒绝的网关" 'x-gateway-name: filegw'
+
+req POST "$FILE_GW/api/health"
+expect_code "文件模式：方法不符 405" 405
+head_has "  Allow 头" 'allow: GET'
+
+# 改写文件 → TTL 内生效（不 reload nginx）
+cat >"$FILE_PREFIX/conf/contract.json" <<'JSON'
+{
+  "protocol": 1,
+  "version": "file-mode-2",
+  "routes": [{ "path": "/api/user/{id}", "methods": ["GET"] }]
+}
+JSON
+for _ in $(seq 1 50); do
+  req GET "$FILE_GW/api/user/99"
+  [ "$CODE" = "200" ] && break
+  sleep 0.1
+done
+expect_code "文件改动后新路由生效" 200
+req GET "$FILE_GW/api/health"
+expect_code "文件改动后旧路由失效" 404
+
+# 坏文件不能把线上打成 503：保留上一份成功契约
+printf '{ "protocol": 1, "routes": [ ' >"$FILE_PREFIX/conf/contract.json"
+sleep 2
+req GET "$FILE_GW/api/user/99"
+expect_code "坏文件保留上一份成功契约" 200
+
+file_nginx -s stop >/dev/null 2>&1
+
+section "11. 契约来源互斥（nginx -t）"
+sed "s|gateway_info_url myrustwebdemo2 http://127.0.0.1:9000/info_v2;|&\n    gateway_info_file myrustwebdemo2 $TMP/contract-both.json;|" \
+  "$BASE_CONF" >"$TMP/t-both.conf"
+if nginx_t "$TMP/t-both.conf"; then
+  bad "url 与 file 同时指定被拒绝" "nginx -t 竟然通过"
+else
+  ok "url 与 file 同时指定被拒绝"
+fi
+if grep -q 'already has a contract source' "$TMP/nginx-t.log"; then
+  ok "  错误信息说明来源互斥"
+else
+  bad "  错误信息说明来源互斥" "$(head -3 "$TMP/nginx-t.log")"
 fi
 
 printf '\n\033[1m结果：%d 通过，%d 失败\033[0m\n' "$PASS" "$FAIL"

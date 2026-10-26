@@ -1,6 +1,6 @@
 # 开发进度与文档目录
 
-最后更新：2026-10-26 · 当前：**阶段 1 + 阶段 1.5 已完成**（契约真正被读取并生效），下一步阶段 5（Query/Body/Header 校验）
+最后更新：2026-10-26 · 当前：**阶段 1 + 阶段 1.5 已完成**（契约真正被读取并生效，新增文件来源），下一步阶段 5（Query/Body/Header 校验）
 
 ## 1. 文档目录
 
@@ -19,13 +19,13 @@
 | `crates/gateway-core/src/gateway.rs` | 纯逻辑：契约解析、matchit 路由树、404/405 判定（无 nginx 依赖） |
 | `crates/gateway-core/src/contract.rs` | 契约 JSON 结构（v1：`protocol` / `version` / `ttl` / `meta` / `unmatched` / `routes[].path/methods`） |
 | `crates/gateway-core/tests/protocol_v1.rs` | 42 项协议单测（§2 顶层 / §2.1 未声明策略 / §3.1 路径 / §3.2 方法 / §4 状态码） |
-| `crates/ngx-gateway/src/lib.rs` | nginx 适配层：具名网关注册、每网关刷新线程、access 判定与响应头 |
+| `crates/ngx-gateway/src/lib.rs` | nginx 适配层：具名网关注册、契约来源（URL 拉取 / 文件 stat+重读）、每网关刷新线程、access 判定与响应头 |
 | `demo_server/src/main.rs` | demo 后端：登录/用户/商品/订单 + 两份固定契约 `GET /info`、`GET /info_v2` |
 | `deploy/nginx.conf` | 运行时 nginx 配置（源文件，脚本会拷到 `nginx/conf/`） |
 | `scripts/build-nginx.sh` | 下载并编译本地 nginx 1.28.0 到 `nginx/` |
 | `scripts/build-module.sh` | 编译 `.so` → `nginx/modules/libmy_gateway.so` |
 | `scripts/dev.sh` | `up / down / restart / status / logs`（含孤儿进程清理） |
-| `tests/phase1.sh` | curl 验收，**78 项断言** |
+| `tests/phase1.sh` | curl 验收，**94 项断言**（含独立实例的契约文件模式） |
 
 ## 2. 阶段状态
 
@@ -58,7 +58,7 @@ location 通过 `enable_gateway_by <网关名>` 选择网关，可写多条（�
 
 ```nginx
 http {
-    # 网关注册表：声明名字 → 契约地址 → 可选 TTL（默认 60）
+    # 网关注册表：声明名字 → 契约来源（URL 或文件，二选一）→ 可选 TTL（默认 60）
     gateway_name     myrustwebdemo1;
     gateway_info_url myrustwebdemo1 http://127.0.0.1:9000/info;
     gateway_ttl      myrustwebdemo1 3;
@@ -67,6 +67,12 @@ http {
     gateway_name     myrustwebdemo2;
     gateway_info_url myrustwebdemo2 http://127.0.0.1:9000/info_v2;
     gateway_ttl      myrustwebdemo2 5;
+
+    # 也可以从本地文件读契约（后端被入侵也改不了规则）；
+    # 相对路径按 nginx prefix 解析，发布用 mv 原子替换
+    gateway_name      filegw;
+    gateway_info_file filegw conf/contracts/demo.json;
+    gateway_ttl       filegw 2;
 
     server {
         location / {
@@ -109,8 +115,13 @@ demo_server 提供两份内容不同的契约，专供多网关对照：
 同一个路径如果绑 `/info` 网关则是 404。`/api/audit` 同时绑两个网关时仍被 `/info` 判 404（它先判）。
 
 - 定义都是 **http(main) 级**，每个配置周期在 `preconfiguration` 重置后重新解析；
-- **顺序要求**：`gateway_name` → `gateway_info_url` → 可选 `gateway_ttl`，且定义写在引用它的
-  location 之前；未知名字、重复定义、缺 `gateway_info_url`、非法 TTL 都会被 `nginx -t` 拒绝；
+- **顺序要求**：`gateway_name` → 契约来源 → 可选 `gateway_ttl`，且定义写在引用它的
+  location 之前；未知名字、重复定义、缺契约来源、同时写 URL+文件、非法 TTL 都会被 `nginx -t` 拒绝；
+- 契约来源二选一：`gateway_info_url`（HTTP 拉取）或 `gateway_info_file`（本地文件）。
+  文件模式是为了**后端被入侵也改不了网关规则**：URL 模式下改自己的 `/info` 就能改规则；
+  文件由发布流程写入、后端只读（root + 0640、`mv` 原子替换），规则变更走发布而不是联网。
+  相对路径按 nginx prefix 解析，TTL 语义为"检查变化的间隔"（只 `stat`）。
+  详见 [PROTOCOL.md](PROTOCOL.md) 第 1.1 / 1.2 节；
 - 每个被 location 引用的网关在 worker 里各起一个刷新线程 + 独立快照；只声明没引用的不拉取；
 - 路径判定用**原始** request target（去掉 `?query`，不合并 `//`、不做百分号解码），
   nginx 的 `merge_slashes` 只影响 location 匹配；`//api/health` 与 `/api/health` 是两条不同路径；
@@ -157,7 +168,7 @@ $ ./tests/phase1.sh
 7. 未声明路由策略（deny/forward）  14/14
 8. 日志                            5/5
 9. 配置校验（nginx -t）             5/5
-结果：78 通过，0 失败
+结果：94 通过，0 失败
 ```
 
 手工复验过的关键行为：
@@ -202,6 +213,7 @@ cargo test --offline -p gateway-core   # 纯逻辑
 | 2026-10-26 | 修复路径判定与上游不一致：改用原始 request target 取 path（`//api/health` 以前被 nginx `merge_slashes` 归一后放行，后端却收到原始路径） | 73/73 通过 |
 | 2026-10-26 | 未声明路由策略：顶层可选 `unmatched`（`deny` 默认 / `forward` 交给后端）。开发期协议仍是 v1，不升版本号；demo 的 `/info_v2` 用 `unmatched: forward` 做对照 | 25 单测 + 78/78 通过 |
 | 2026-10-26 | 测试按协议重写为 `protocol_v1.rs`（42 项，自包含、无共享夹具）；新增 `Decision::status_code` 并让 nginx 适配层复用，测试可直接断言 404/405 | 42 单测 + 78/78 通过 |
+| 2026-10-26 | 新增契约来源 `gateway_info_file`（本地文件，与 `gateway_info_url` 二选一）：每个 TTL 只 `stat`，mtime/长度/inode 变化才重读；坏文件保留 last-known-good；相对路径按 nginx prefix 解析。动机是**后端被入侵时不能改网关规则** | 42 单测 + 94/94 通过 |
 
 ## 5. 常用命令
 
@@ -289,7 +301,8 @@ for r in /tmp/llvmdl/*.x86_64.rpm; do rpm2cpio "$r" | cpio -idmu -D .build/llvm;
 2. 把内置探针规则（`.php` / `.env` / `.git*` / `/wp-*`）改成数据驱动，作为契约的默认兜底规则。
 3. 去掉每请求 `to_ascii_lowercase` 的分配（探针匹配用 `eq_ignore_ascii_case` 或预编译表）。
 4. 多 worker 评估：当前每个 worker 各拉一份契约（N 个 worker = N 次 TTL 请求）；量大时改共享内存或 master 拉取。
-5. 契约来源加固：可选签名校验 / 仅允许本机回环地址 / 拉取失败告警。
+5. 契约来源加固：可选签名校验 / 仅允许本机回环地址 / 拉取失败告警；
+   高安全场景直接用 `gateway_info_file`，把规则交给发布流程（后端只读）。
 
 ## 8. 已知限制
 
