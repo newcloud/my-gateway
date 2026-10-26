@@ -448,7 +448,7 @@ impl HttpRequestHandler for GatewayHandler {
                     );
                     request.add_header_out("X-Gateway-Name", name);
                     request.add_header_out("X-Gateway-Reason", outcome.decision.reason());
-                    return HTTPStatus::NOT_FOUND.into();
+                    return denial_status(outcome.decision);
                 }
                 Decision::MethodNotAllowed => {
                     ngx_log_error!(
@@ -465,12 +465,20 @@ impl HttpRequestHandler for GatewayHandler {
                     }
                     request.add_header_out("X-Gateway-Name", name);
                     request.add_header_out("X-Gateway-Reason", outcome.decision.reason());
-                    return HTTPStatus::NOT_ALLOWED.into();
+                    return denial_status(outcome.decision);
                 }
             }
         }
 
         Status::NGX_DECLINED
+    }
+}
+
+/// 拒绝状态码由 `gateway-core` 统一定义，协议测试与线上共用同一份映射。
+fn denial_status(decision: Decision) -> Status {
+    match decision.status_code() {
+        Some(code) => Status(code as ngx_int_t),
+        None => HTTPStatus::INTERNAL_SERVER_ERROR.into(),
     }
 }
 

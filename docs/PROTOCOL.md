@@ -2,7 +2,8 @@
 
 > 本文是**唯一约定**：后端生成 `GET /info` 的返回值、插件解析契约、以及拒绝请求时的行为，都以本文为准。
 > 代码对应：`crates/gateway-core/src/contract.rs`（结构）、`crates/gateway-core/src/gateway.rs`（校验与判定）、
-> `crates/ngx-gateway/src/lib.rs`（拉取与响应）、`demo_server/src/main.rs`（参考实现）。
+> `crates/ngx-gateway/src/lib.rs`（拉取与响应）、`demo_server/src/main.rs`（参考实现）、
+> `crates/gateway-core/tests/protocol_v1.rs`（协议用例，`cargo test` 不加载 nginx）。
 >
 > 状态：**v1 已实现（含未声明路由策略 `unmatched`）**。项目仍在开发中，协议只有 v1：
 > 加字段直接改本版本，不递增版本号。文中标注 `🧪 草案` 的字段/语义插件**尚未支持**，

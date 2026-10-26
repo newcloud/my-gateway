@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 阶段 1（含 1.5）curl 验收：直连后端 vs 经过网关，覆盖放行/探针/契约/多网关绑定。
-# 前置：scripts/dev.sh up（80 项断言，全部通过才算过）
+# 前置：scripts/dev.sh up（78 项断言，全部通过才算过）
 set -uo pipefail
 
 # 本地测试永远不走代理

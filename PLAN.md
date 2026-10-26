@@ -130,7 +130,7 @@ pub enum Decision {
 > **实现备注（1.5 已落地）**：`Decision` 目前是 `Allow / RouteNotDeclared(404) / MethodNotAllowed(405)`
 > 三个语义化变体 + `Outcome { decision, allow }`（405 回写 `Allow`）；等阶段 5 加参数校验时再引入
 > `Reject { status, reason, detail }` 统一承载 400/413。`examples/check` CLI 尚未做，当前用
-> `crates/gateway-core/tests/contract_cases.rs` 覆盖。
+> `crates/gateway-core/tests/protocol_v1.rs` 覆盖（42 项，按协议章节组织）。
 
 退出条件：
 
@@ -256,7 +256,7 @@ pub enum Decision {
 | --- | --- | --- | --- |
 | 1 | 可加载的 .so + demo 后端 /info | curl 三态可见 | ✅ |
 | 1.5 | 契约真正生效（具名多网关 + TTL 拉取 + 404/405 + fail-closed） | `tests/phase1.sh` 78/78 | ✅ |
-| 2 | `gateway-core` + 测试骨架 | `cargo test` 全绿，无需 nginx | ✅（22 项） |
+| 2 | `gateway-core` + 测试骨架 | `cargo test` 全绿，无需 nginx | ✅（42 项） |
 | 3 | 方法校验 + 动态刷新 | 改后端契约即时生效，无需 reload | ✅（TTL 3s 验证） |
 | 4 | Radix 路由 + 契约 v1 | 扫描类请求 404，动态路由通过 | ✅（基础部分） |
 | 5 | Query/Body/Header 校验 | 三类非法参数各一组用例 | ⬜ |

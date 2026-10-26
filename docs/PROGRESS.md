@@ -9,6 +9,7 @@
 | [../PLAN.md](../PLAN.md) | 总计划：架构约束、5 个阶段、里程碑、明确不做的范围 |
 | [PROTOCOL.md](PROTOCOL.md) | **网关协议 v1（契约接口的唯一约定）**：字段、未声明路由策略、匹配/方法语义、拒绝响应、演进规则、草案 |
 | [PHASE1_PLAN.md](PHASE1_PLAN.md) | 阶段 1 详细计划：环境结论、交付物、任务表、验收命令、风险 |
+| [PROTOCOL_TEST_PLAN.md](PROTOCOL_TEST_PLAN.md) | **协议测试清单**：纯 `gateway-core` 42 项用例、写法约束、与 `phase1.sh` 的分工 |
 | [PROGRESS.md](PROGRESS.md) | 本文：当前进度、验证记录、常用命令、待办 |
 
 代码索引：
@@ -17,7 +18,7 @@
 | --- | --- |
 | `crates/gateway-core/src/gateway.rs` | 纯逻辑：契约解析、matchit 路由树、404/405 判定（无 nginx 依赖） |
 | `crates/gateway-core/src/contract.rs` | 契约 JSON 结构（v1：`protocol` / `version` / `ttl` / `meta` / `unmatched` / `routes[].path/methods`） |
-| `crates/gateway-core/tests/contract_cases.rs` | 25 项核心单测（命中、方法、尾斜杠、重复路由、协议版本、`unmatched`、坏 JSON…） |
+| `crates/gateway-core/tests/protocol_v1.rs` | 42 项协议单测（§2 顶层 / §2.1 未声明策略 / §3.1 路径 / §3.2 方法 / §4 状态码） |
 | `crates/ngx-gateway/src/lib.rs` | nginx 适配层：具名网关注册、每网关刷新线程、access 判定与响应头 |
 | `demo_server/src/main.rs` | demo 后端：登录/用户/商品/订单 + 两份固定契约 `GET /info`、`GET /info_v2` |
 | `deploy/nginx.conf` | 运行时 nginx 配置（源文件，脚本会拷到 `nginx/conf/`） |
@@ -32,7 +33,7 @@
 | --- | --- | --- |
 | 1 | 最小可行性 Demo（Rust 模块 + 本地 nginx + demo 后端 + curl） | ✅ 完成 |
 | 1.5 | 配置真正生效：具名网关 + 契约拉取 + 404/405 | ✅ 完成（提前吃掉阶段 2–4 的核心） |
-| 2 | 纯本地 TDD（`gateway-core`，脱离 nginx） | ✅ 完成（25 项单测） |
+| 2 | 纯本地 TDD（`gateway-core`，脱离 nginx） | ✅ 完成（42 项协议单测） |
 | 3 | 方法校验 + 契约动态拉取（TTL 线程 + 只读快照） | ✅ 完成 |
 | 4 | 动态路由（matchit）+ 契约 v1 | ✅ 基础完成（严格匹配、`Allow` 回写） |
 | 5 | Query / Body / Header 参数校验 | ⬜ 未开始 |
@@ -140,6 +141,11 @@ demo 后端两份契约都按文档带 `meta` 且 `protocol: 1`：`/info` 是默
 运行环境：Fedora 43 / Rust 1.96.0 / nginx 1.28.0（本地源码编译）/ `ngx` git rev `15719544`。
 
 ```
+$ cargo test -p gateway-core
+test result: ok. 42 passed; 0 failed
+```
+
+```
 $ ./tests/phase1.sh
 0. 连通性                         2/2
 1. 正常业务请求（放行）            9/9
@@ -195,6 +201,7 @@ cargo test --offline -p gateway-core   # 纯逻辑
 | 2026-10-26 | 清理死代码：删除 `EXAMPLE_CONTRACT`、未使用的 re-export、`Decision::status`；`meta` 改为 `_meta` 消除 dead_code 警告 | 22 单测 + 66/66，编译无警告 |
 | 2026-10-26 | 修复路径判定与上游不一致：改用原始 request target 取 path（`//api/health` 以前被 nginx `merge_slashes` 归一后放行，后端却收到原始路径） | 73/73 通过 |
 | 2026-10-26 | 未声明路由策略：顶层可选 `unmatched`（`deny` 默认 / `forward` 交给后端）。开发期协议仍是 v1，不升版本号；demo 的 `/info_v2` 用 `unmatched: forward` 做对照 | 25 单测 + 78/78 通过 |
+| 2026-10-26 | 测试按协议重写为 `protocol_v1.rs`（42 项，自包含、无共享夹具）；新增 `Decision::status_code` 并让 nginx 适配层复用，测试可直接断言 404/405 | 42 单测 + 78/78 通过 |
 
 ## 5. 常用命令
 

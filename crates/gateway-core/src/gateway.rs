@@ -4,7 +4,7 @@ use core::fmt;
 
 use matchit::Router;
 
-use crate::contract::{Contract, SUPPORTED_PROTOCOL, Unmatched};
+use crate::contract::{Contract, Unmatched, SUPPORTED_PROTOCOL};
 
 /// 契约解析/编译错误。带上是第几条路由，方便定位后端上报的问题。
 #[derive(Debug)]
@@ -73,6 +73,18 @@ impl Decision {
             Decision::Allow => "allow",
             Decision::RouteNotDeclared => "route-not-declared",
             Decision::MethodNotAllowed => "method-not-allowed",
+        }
+    }
+
+    /// 该判定对应的 HTTP 状态码。
+    ///
+    /// `Allow` 不产生响应（继续走 `proxy_pass`），返回 `None`；拒绝类判定在这里定死，
+    /// 适配层直接使用，保证协议测试与线上是同一份映射。
+    pub fn status_code(self) -> Option<u16> {
+        match self {
+            Decision::Allow => None,
+            Decision::RouteNotDeclared => Some(404),
+            Decision::MethodNotAllowed => Some(405),
         }
     }
 }

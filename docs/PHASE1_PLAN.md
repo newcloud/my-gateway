@@ -53,7 +53,7 @@ my_gateway/
 │   └── PROGRESS.md               # 进度 + 文档目录
 ├── crates/gateway-core/           # 纯逻辑：契约解析 / 路由 / 判定（1.5 新增）
 │   ├── src/{contract,gateway,lib}.rs
-│   └── tests/contract_cases.rs    # 22 项单测
+│   └── tests/protocol_v1.rs       # 42 项协议单测（原 contract_cases.rs）
 ├── crates/ngx-gateway/            # nginx 动态模块（cdylib）
 │   └── src/lib.rs                 # 指令 + 契约刷新线程 + access handler
 ├── demo_server/                   # 被保护的后端 + 固定契约
