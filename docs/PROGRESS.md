@@ -7,7 +7,7 @@
 | 文档 | 内容 |
 | --- | --- |
 | [../PLAN.md](../PLAN.md) | 总计划：架构约束、5 个阶段、里程碑、明确不做的范围 |
-| [PROTOCOL.md](PROTOCOL.md) | **网关协议（契约接口的唯一约定）**：v1/v2 字段、未声明路由策略、匹配/方法语义、拒绝响应、演进规则、草案 |
+| [PROTOCOL.md](PROTOCOL.md) | **网关协议 v1（契约接口的唯一约定）**：字段、未声明路由策略、匹配/方法语义、拒绝响应、演进规则、草案 |
 | [PHASE1_PLAN.md](PHASE1_PLAN.md) | 阶段 1 详细计划：环境结论、交付物、任务表、验收命令、风险 |
 | [PROGRESS.md](PROGRESS.md) | 本文：当前进度、验证记录、常用命令、待办 |
 
@@ -16,8 +16,8 @@
 | 位置 | 作用 |
 | --- | --- |
 | `crates/gateway-core/src/gateway.rs` | 纯逻辑：契约解析、matchit 路由树、404/405 判定（无 nginx 依赖） |
-| `crates/gateway-core/src/contract.rs` | 契约 JSON 结构（v1/v2：`protocol` / `version` / `ttl` / `meta` / `unmatched` / `routes[].path/methods`） |
-| `crates/gateway-core/tests/contract_cases.rs` | 26 项核心单测（命中、方法、尾斜杠、重复路由、协议版本、`unmatched`、坏 JSON…） |
+| `crates/gateway-core/src/contract.rs` | 契约 JSON 结构（v1：`protocol` / `version` / `ttl` / `meta` / `unmatched` / `routes[].path/methods`） |
+| `crates/gateway-core/tests/contract_cases.rs` | 25 项核心单测（命中、方法、尾斜杠、重复路由、协议版本、`unmatched`、坏 JSON…） |
 | `crates/ngx-gateway/src/lib.rs` | nginx 适配层：具名网关注册、每网关刷新线程、access 判定与响应头 |
 | `demo_server/src/main.rs` | demo 后端：登录/用户/商品/订单 + 两份固定契约 `GET /info`、`GET /info_v2` |
 | `deploy/nginx.conf` | 运行时 nginx 配置（源文件，脚本会拷到 `nginx/conf/`） |
@@ -32,7 +32,7 @@
 | --- | --- | --- |
 | 1 | 最小可行性 Demo（Rust 模块 + 本地 nginx + demo 后端 + curl） | ✅ 完成 |
 | 1.5 | 配置真正生效：具名网关 + 契约拉取 + 404/405 | ✅ 完成（提前吃掉阶段 2–4 的核心） |
-| 2 | 纯本地 TDD（`gateway-core`，脱离 nginx） | ✅ 完成（26 项单测） |
+| 2 | 纯本地 TDD（`gateway-core`，脱离 nginx） | ✅ 完成（25 项单测） |
 | 3 | 方法校验 + 契约动态拉取（TTL 线程 + 只读快照） | ✅ 完成 |
 | 4 | 动态路由（matchit）+ 契约 v1 | ✅ 基础完成（严格匹配、`Allow` 回写） |
 | 5 | Query / Body / Header 参数校验 | ⬜ 未开始 |
@@ -76,9 +76,9 @@ http {
             enable_gateway_by myrustwebdemo1;      # 绑定多个：与语义
             enable_gateway_by myrustwebdemo2;
         }
-        location = /info_v2        { enable_gateway_by myrustwebdemo2; ... }  # 只在 v2 契约
+        location = /info_v2        { enable_gateway_by myrustwebdemo2; ... }  # 只在 /info_v2 契约
         location = /api/user/99    { enable_gateway_by myrustwebdemo2; ... }  # 只在 v1 契约 → 404
-        location = /api/audit      { enable_gateway_by myrustwebdemo1;        # 只在 v2 契约
+        location = /api/audit      { enable_gateway_by myrustwebdemo1;        # 只在 /info_v2 契约
                                      enable_gateway_by myrustwebdemo2; ... }  # v1 先判 → 404
         location /passthrough/ {
             # 不写 enable_gateway_by = 只透传，不做判定
@@ -93,7 +93,7 @@ demo_server 提供两份内容不同的契约，专供多网关对照：
 | 契约地址 | `version` | 只在它里面声明的路径 |
 | --- | --- | --- |
 | `http://127.0.0.1:9000/info` | `phase1-fixed` | `/api/login`、`/api/user/{id}`、`/api/user/{id}/profile` |
-| `http://127.0.0.1:9000/info_v2` | `phase1-v2` | `/info_v2`、`/api/metrics`、`/api/reports/{year}` |
+| `http://127.0.0.1:9000/info_v2` | `phase1-forward` | `/info_v2`、`/api/metrics`、`/api/reports/{year}` |
 
 两边都有：`/info`、`/api/health`、`/api/products`、`/api/orders`、`/api/echo`。
 
@@ -102,10 +102,10 @@ demo_server 提供两份内容不同的契约，专供多网关对照：
 | 契约 | `protocol` | `unmatched` | 未声明路径的行为 |
 | --- | --- | --- | --- |
 | `/info` | 1 | 省略 = `deny` | 网关直接 404，不转发 |
-| `/info_v2` | 2 | `forward` | 交给后端处理（`/api/user/99` 直连 200，经 v2 也是 200） |
+| `/info_v2` | 1 | `forward` | 交给后端处理（`/api/user/99` 直连 200，经它也是 200） |
 
-`/api/user/99` 在 v2 契约里没有声明，但 v2 是 `forward` → 请求到后端并返回 200；
-同一个路径如果绑 v1 网关则是 404。`/api/audit` 同时绑 v1+v2 时仍被 v1 判 404（v1 先判）。
+`/api/user/99` 在 `/info_v2` 里没有声明，但它是 `forward` → 请求到后端并返回 200；
+同一个路径如果绑 `/info` 网关则是 404。`/api/audit` 同时绑两个网关时仍被 `/info` 判 404（它先判）。
 
 - 定义都是 **http(main) 级**，每个配置周期在 `preconfiguration` 重置后重新解析；
 - **顺序要求**：`gateway_name` → `gateway_info_url` → 可选 `gateway_ttl`，且定义写在引用它的
@@ -113,7 +113,7 @@ demo_server 提供两份内容不同的契约，专供多网关对照：
 - 每个被 location 引用的网关在 worker 里各起一个刷新线程 + 独立快照；只声明没引用的不拉取；
 - 路径判定用**原始** request target（去掉 `?query`，不合并 `//`、不做百分号解码），
   nginx 的 `merge_slashes` 只影响 location 匹配；`//api/health` 与 `/api/health` 是两条不同路径；
-- 未声明路由默认 `deny`（404）；契约写 `"protocol": 2` + `"unmatched": "forward"` 时改为转发给后端，
+- 未声明路由默认 `deny`（404）；契约写 `"unmatched": "forward"` 时改为转发给后端，
   已声明路由的方法校验仍然严格（405），详见 [PROTOCOL.md](PROTOCOL.md) 第 2.1 节；
 - access 阶段只读对应网关的快照，不做网络 I/O；同一条消息（成功/失败）只在状态变化时写一次日志；
 - 契约任一路由非法（不以 `/` 开头、尾斜杠、重复、空方法）→ 该网关整份契约拒绝加载，继续用上一份好快照；
@@ -121,20 +121,19 @@ demo_server 提供两份内容不同的契约，专供多网关对照：
 - worker 退出时（`exit_process`）先置停止标记再 join 所有刷新线程（sleep 50ms 粒度，最坏等一次 HTTP 超时），
   避免进程 teardown 与 detached 线程并发造成关闭期 `exited on signal 11`。
 
-### 契约格式（协议 v1 / v2）
+### 契约格式（协议 v1）
 
 以 **[PROTOCOL.md](PROTOCOL.md)** 为唯一约定：`protocol` / `version` / `ttl` / `meta` / `unmatched` / `routes[].path|methods`。
 当前解析是**严格模式**：
 
-- `protocol` 不在 `1..=2`（插件支持的版本）→ 整份拒绝，日志提示升级插件或降低后端版本；
-- `unmatched` 只在 `protocol: 2` 有效；写在 v1 契约里按未知字段整份拒绝；
+- `protocol` 不等于 `1`（插件支持的版本）→ 整份拒绝，日志提示升级插件或降低后端版本；
 - 顶层或 `routes[]` 出现未定义字段（如提前写 `priority` / `query` / `responses`）→ 整份拒绝；
 - `meta` 是自由 JSON，插件忽略，不需要递增协议版本。
 
-demo 后端两份契约都按文档带 `meta`：v1（`/info`）是 `protocol: 1`，v2（`/info_v2`）是
-`protocol: 2` + `unmatched: "forward"`。插件日志分别输出
+demo 后端两份契约都按文档带 `meta` 且 `protocol: 1`：`/info` 是默认 `deny`，`/info_v2` 写了
+`unmatched: "forward"`。插件日志分别输出
 `[myrustwebdemo1] contract loaded protocol=1 version=phase1-fixed routes=8 unmatched=deny` 和
-`[myrustwebdemo2] contract loaded protocol=2 version=phase1-v2 routes=8 unmatched=forward`。
+`[myrustwebdemo2] contract loaded protocol=1 version=phase1-forward routes=8 unmatched=forward`。
 
 ## 4. 验证记录
 
@@ -168,11 +167,11 @@ $ ./tests/phase1.sh
 | `GET /phpinfo.php` | 403 + `X-Gateway-Blocked: php-suffix` | 一致 |
 | `/passthrough/api/admin/users` | 200（未绑定网关） | 一致 |
 | `POST /info`（绑定 demo1 + demo2） | 405 + `X-Gateway-Name: myrustwebdemo1` | 一致 |
-| `GET /info_v2`（只绑 demo2） | 200，响应体 `version: phase1-v2` | 一致 |
-| `GET /api/user/99`（demo2 契约未声明，v2 是 `forward`） | 200，交给后端（`x-demo-backend: 1`） | 一致 |
-| `POST /api/metrics`（v2 已声明 GET） | 405 + `Allow: GET` + `X-Gateway-Name: myrustwebdemo2` | 一致 |
-| `GET /api/audit`（只在 v2；同时绑两个网关） | 404 + `X-Gateway-Name: myrustwebdemo1`（v1 先判） | 一致 |
-| `GET /api/reports/2026`（v2 动态路由） | 200 + `"year":"2026"` | 一致 |
+| `GET /info_v2`（只绑 demo2） | 200，响应体 `version: phase1-forward` | 一致 |
+| `GET /api/user/99`（`/info_v2` 契约未声明，且是 `forward`） | 200，交给后端（`x-demo-backend: 1`） | 一致 |
+| `POST /api/metrics`（`/info_v2` 已声明 GET） | 405 + `Allow: GET` + `X-Gateway-Name: myrustwebdemo2` | 一致 |
+| `GET /api/audit`（只在 `/info_v2`；同时绑两个网关） | 404 + `X-Gateway-Name: myrustwebdemo1`（`/info` 先判） | 一致 |
+| `GET /api/reports/2026`（`/info_v2` 动态路由） | 200 + `"year":"2026"` | 一致 |
 | **只起 nginx、后端未起** | 503 + `X-Gateway-Reason: contract-not-ready` | 一致 |
 | 后端起来后（不重启 nginx） | 自动恢复 200 | 一致（TTL 3s 内） |
 
@@ -195,7 +194,7 @@ cargo test --offline -p gateway-core   # 纯逻辑
 | 2026-10-26 | demo_server 新增 `GET /info_v2`（内容与 `/info` 部分重叠）；`myrustwebdemo2` 改指向它，新增 4 个差异对照 location；`dev.sh` 在 demo_server 源码更新后自动重编 | 66/66 通过 |
 | 2026-10-26 | 清理死代码：删除 `EXAMPLE_CONTRACT`、未使用的 re-export、`Decision::status`；`meta` 改为 `_meta` 消除 dead_code 警告 | 22 单测 + 66/66，编译无警告 |
 | 2026-10-26 | 修复路径判定与上游不一致：改用原始 request target 取 path（`//api/health` 以前被 nginx `merge_slashes` 归一后放行，后端却收到原始路径） | 73/73 通过 |
-| 2026-10-26 | **协议 v2**：顶层可选 `unmatched`（`deny` 默认 / `forward` 交给后端），插件接受 `protocol 1..=2`；demo 的 `/info_v2` 改为 `protocol: 2 + unmatched: forward` | 26 单测 + 78/78 通过 |
+| 2026-10-26 | 未声明路由策略：顶层可选 `unmatched`（`deny` 默认 / `forward` 交给后端）。开发期协议仍是 v1，不升版本号；demo 的 `/info_v2` 用 `unmatched: forward` 做对照 | 25 单测 + 78/78 通过 |
 
 ## 5. 常用命令
 

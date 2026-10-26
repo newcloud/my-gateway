@@ -1,11 +1,12 @@
-# 网关协议（契约接口，v1 / v2）
+# 网关协议 v1（契约接口）
 
 > 本文是**唯一约定**：后端生成 `GET /info` 的返回值、插件解析契约、以及拒绝请求时的行为，都以本文为准。
 > 代码对应：`crates/gateway-core/src/contract.rs`（结构）、`crates/gateway-core/src/gateway.rs`（校验与判定）、
 > `crates/ngx-gateway/src/lib.rs`（拉取与响应）、`demo_server/src/main.rs`（参考实现）。
 >
-> 状态：**v1 已实现；v2 已实现未声明路由策略（`unmatched`）**。文中标注 `🧪 草案` 的字段/语义插件
-> **尚未支持**，提前出现在契约里会被拒绝加载（fail-closed）。
+> 状态：**v1 已实现（含未声明路由策略 `unmatched`）**。项目仍在开发中，协议只有 v1：
+> 加字段直接改本版本，不递增版本号。文中标注 `🧪 草案` 的字段/语义插件**尚未支持**，
+> 提前出现在契约里会被拒绝加载（fail-closed）。
 
 ## 0. 版本与演进
 
@@ -15,15 +16,17 @@
 | 内容版本 | 顶层 `version` | 后端契约的**内容修订号**，仅用于日志/排查，不参与解析 |
 | 刷新周期 | 顶层 `ttl` | 建议值（秒）。当前插件以该网关的 `gateway_ttl` 为准 |
 
-当前插件支持 `protocol = 1..=2`（`1` 保持旧语义，`2` 增加可选 `unmatched`）。演进规则：
+当前插件只支持 `protocol = 1`。演进规则：
 
-1. **任何影响判定的变更都必须递增 `protocol`**：新增校验字段（`priority` / `query` / `body` / `headers` / `responses`）、
-   改变匹配或状态码语义，都算。旧插件看到更高的 `protocol` 会**拒绝整份契约**（不会"读一半"）。
-2. **纯信息字段**放进顶层 `meta`（自由 JSON 对象），不需要递增版本；插件必须忽略 `meta`。
-3. v1 的解析是**严格模式**：顶层与 `routes[]` 内出现未定义的字段，整份契约拒绝加载，日志写明字段名。
-   这样后端误发新字段时会在演示环境立刻暴露，而不是被静默忽略造成"以为生效了"。
-4. 新增字段时优先设计成**可选**：新插件解析旧契约（没有新字段）时行为必须完全不变。
-5. `routes: []` 合法，语义是"拒绝所有未在契约中声明的路由"（即全站 404，`/passthrough/` 之类关掉网关的 location 除外）。
+1. **开发期不递增版本**：契约还没正式对外使用，加字段、改语义都直接改 v1；不存在需要兼容的旧契约。
+2. **正式上线后**，只有需要同时兼容旧契约（新旧插件/后端混跑）时才递增 `protocol`，
+   并明确旧版本在新插件里的行为（通常整份拒绝或按旧语义解析）。
+3. 插件看到不支持的 `protocol` 会**拒绝整份契约**（不会"读一半"）。
+4. **纯信息字段**放进顶层 `meta`（自由 JSON 对象），插件必须忽略 `meta`。
+5. 解析是**严格模式**：顶层与 `routes[]` 内出现未定义的字段，整份契约拒绝加载，日志写明字段名。
+   这样后端误发字段时会立刻暴露，而不是被静默忽略造成"以为生效了"。
+6. 新增字段优先设计成**可选**：省略时行为保持合理默认值。
+7. `routes: []` 合法，语义是"拒绝所有未在契约中声明的路由"（即全站 404，`/passthrough/` 之类关掉网关的 location 除外）。
 
 ## 1. 传输约定
 
@@ -39,10 +42,11 @@
 
 `/info` 本身也应出现在 `routes` 里（后端自查用），是否放行由契约决定。
 
-demo_server 同时提供 `/info`（`version: phase1-fixed`）与 `/info_v2`（`version: phase1-v2`），
-两份内容部分重叠，用来让 nginx 里的两个网关指向不同地址、验证各自独立的快照；两者协议版本都是 `1`。
+demo_server 同时提供 `/info`（`version: phase1-fixed`，默认 `deny`）与 `/info_v2`
+（`version: phase1-forward`，`unmatched: "forward"`），两份内容部分重叠，用来让 nginx 里的
+两个网关指向不同地址、验证各自独立的快照与不同的未声明策略；两者 `protocol` 都是 `1`。
 
-## 2. 顶层结构（v1 / v2）
+## 2. 顶层结构（v1）
 
 ```json
 {
@@ -63,11 +67,11 @@ demo_server 同时提供 `/info`（`version: phase1-fixed`）与 `/info_v2`（`v
 | `version` | string | 否 | — | 内容修订号，仅进日志 |
 | `ttl` | int（秒） | 否 | — | 建议刷新周期，当前被该网关的 `gateway_ttl` 覆盖 |
 | `meta` | object | 否 | — | 自由信息，插件忽略 |
-| `unmatched` | string | 否 | `"deny"` | **protocol 2**：未声明路由策略，`deny` / `forward`，见 2.1 |
+| `unmatched` | string | 否 | `"deny"` | 未声明路由策略：`deny` / `forward`，见 2.1 |
 | `routes` | array | 是 | `[]` | 路由声明，见第 3 节 |
 | 其他字段 | — | — | — | **拒绝整份契约** |
 
-### 2.1 未声明路由策略（protocol 2 已实现）
+### 2.1 未声明路由策略
 
 有些后端希望"契约只写重点路由，其余路径仍交给后端自己处理"（迁移期、旧客户端兼容）。
 `unmatched` 就是控制这个行为的开关：
@@ -79,7 +83,7 @@ demo_server 同时提供 `/info`（`version: phase1-fixed`）与 `/info_v2`（`v
 
 ```json
 {
-  "protocol": 2,
+  "protocol": 1,
   "unmatched": "forward",
   "routes": [
     { "path": "/api/health", "methods": ["GET"] }
@@ -90,13 +94,11 @@ demo_server 同时提供 `/info`（`version: phase1-fixed`）与 `/info_v2`（`v
 约束与注意：
 
 - **只影响"路径未声明"**：已经声明的路由，方法不符仍然是 `405 + Allow`，不会转发。
-- `unmatched` 必须配合 `protocol: 2`。写在 `protocol: 1` 契约里会按未知字段**整份拒绝**，
-  避免"后端以为开了转发、插件却按旧语义处理"。
 - 其他值（如 `"allow"`）→ JSON 解析失败 → 整份契约拒绝。
 - 安全提示：`forward` 会把扫描器路径、拼错路径也交给后端，后端必须自己兜底（返回 404 而不是泄漏）。
   它定位是**迁移期开关**，不是长期默认值；契约覆盖完整后建议改回 `deny`。
 
-## 3. 路由对象（v1）
+## 3. 路由对象
 
 ```json
 {
@@ -111,7 +113,7 @@ demo_server 同时提供 `/info`（`version: phase1-fixed`）与 `/info_v2`（`v
 | `methods` | string[] | 否 | `[]` | 允许的方法；**空数组 = 不限方法**；元素不能是空串 |
 | 其他字段 | — | — | — | **拒绝整份契约**（例如提前写 `priority` 会被拒绝） |
 
-### 3.1 路径匹配（v1 已实现）
+### 3.1 路径匹配
 
 - 路径来自**原始 request target**（只去掉 `?query`；不合并 `//`、不做百分号解码），
   与上游实际收到的路径一致。因此 `/api/products`、`/api/products/`、`//api/products` 是三条不同路径；
@@ -124,18 +126,18 @@ demo_server 同时提供 `/info`（`version: phase1-fixed`）与 `/info_v2`（`v
   | `/api/user/{id}` | 单段参数，名字 `[A-Za-z_][A-Za-z0-9_]*` | `/api/user/42` ✓，`/api/user/42/x` ✗ |
   | `/static/{*rest}` | 通配剩余部分（可跨多段），只能出现在最后一段 | `/static/a/b/c.txt` ✓ |
 - 同一份契约内 `path` 不能重复；参数名不同但形状相同的路由（如 `/u/{id}` 与 `/u/{name}`）视为冲突，拒绝加载。
-- v1 的匹配优先级由路由树决定：**静态段 > 参数段 > 通配**。契约顺序**不**影响结果。
+- 匹配优先级由路由树决定：**静态段 > 参数段 > 通配**。契约顺序**不**影响结果。
 - 🧪 草案（未排期）：新增可选 `priority: i32`（默认 0，越大越先匹配）。命中多条时按 `priority` →
   匹配具体度 → 契约顺序。未实现前，写了 `priority` 的契约会被整份拒绝（严格模式）。
 
-### 3.2 方法匹配（v1 已实现）
+### 3.2 方法匹配
 
 - 方法比较**大小写不敏感**；契约里建议统一大写。
 - `methods` 省略或 `[]` → 不限方法（放行所有方法，包括 `PATCH`、自定义方法）。
 - 路径命中但方法不在列表 → `405`，响应头 `Allow` 按契约书写顺序输出（如 `Allow: GET, PUT`）。
 - `methods` 中任意元素为空串或全空白 → 拒绝整份契约。
 
-## 4. 判定顺序与响应（v1 / v2 已实现）
+## 4. 判定顺序与响应
 
 对绑定了网关的 location（`enable_gateway_by <name>`，可绑定多个），按下列顺序，**先命中先返回**，
 被拒请求不会到达后端：
@@ -161,14 +163,14 @@ demo_server 同时提供 `/info`（`version: phase1-fixed`）与 `/info_v2`（`v
 - `X-Gateway-Name` 标明是哪个网关做出的拒绝（多网关排查用）；探针拦截不带这个头。
 - 演示钩子 `/__gateway/deny` 固定返回 `503` + `X-Gateway-Blocked: demo-deny`，用于验证"插件能自定义状态码"，
   不属于协议的一部分，后续会移除。
-- 响应体不做约定：v1 返回 nginx 默认错误页；客户端应以**状态码 + `X-Gateway-Reason`** 为准。
+- 响应体不做约定：当前返回 nginx 默认错误页；客户端应以**状态码 + `X-Gateway-Reason`** 为准。
 - `X-Gateway-Reason` 是稳定的机器可读 token；以后新增原因只增不改。
-- 🧪 草案（protocol 4）：顶层可选 `responses` 覆盖默认状态码/响应体，见第 6 节。
+- 🧪 草案：顶层可选 `responses` 覆盖默认状态码/响应体，见第 6 节。
 
-## 5. 参数校验（🧪 草案，protocol 3）
+## 5. 参数校验（🧪 草案）
 
-> 设计意图写在前面，避免后端提前依赖未实现的字段：**本节的字段在 protocol 3 落地前不允许出现在契约里**，
-> 出现即整份拒绝（v1 严格模式）。
+> 设计意图写在前面，避免后端提前依赖未实现的字段：**本节的字段在实现前不允许出现在契约里**，
+> 出现即整份拒绝（严格模式）。
 
 ### 5.1 Query
 
@@ -220,13 +222,13 @@ demo_server 同时提供 `/info`（`version: phase1-fixed`）与 `/info_v2`（`v
 - 校验失败统一 `400`，`X-Gateway-Reason` 细分为 `missing-parameter` / `invalid-parameter` /
   `body-too-large`（413）/ `unsupported-media-type`（400）。
 
-## 6. 响应覆盖（🧪 草案，protocol 4）
+## 6. 响应覆盖（🧪 草案）
 
 默认值见第 4 节。后端可选择覆盖"网关拒绝时"的状态码与响应体（只允许拒绝类响应）：
 
 ```json
 {
-  "protocol": 4,
+  "protocol": 1,
   "responses": {
     "route_not_declared": { "status": 404, "body": "{\"error\":\"not_found\"}" },
     "method_not_allowed": { "status": 405 },
@@ -246,18 +248,18 @@ demo_server 同时提供 `/info`（`version: phase1-fixed`）与 `/info_v2`（`v
 
 ## 7. 后端生成契约的检查清单
 
-- [ ] `protocol` 明确写出（或在 v1 缺省为 1），与插件支持版本一致。
+- [ ] `protocol` 明确写出（缺省按 1），当前只有 `1`。
 - [ ] `routes` 覆盖**所有**真实对外路由；漏写 = 线上 404（默认拒绝）。
-- [ ] 确实需要"未声明也转发"时才用 `"unmatched": "forward"`（必须配合 `protocol: 2`），并确保后端自己兜底 404。
+- [ ] 确实需要"未声明也转发"时才用 `"unmatched": "forward"`，并确保后端自己兜底 404。
 - [ ] 每个 `path` 以 `/` 开头、无尾斜杠、无查询串；参数路由用 `{name}` / `{*rest}`。
 - [ ] `methods` 与后端实际注册一致；不限方法才用 `[]`（慎用）。
-- [ ] 不输出本文未定义（或当前版本未支持）的字段；新字段先推进 `protocol` 再上线。
+- [ ] 不输出本文未定义（或尚未支持）的字段。
 - [ ] `/info` 自身也在 `routes` 里。
 - [ ] 契约损坏、超时、非 200 时网关会保留旧契约；后端需监控 `/info` 的可用性。
 
 ## 8. 插件解析契约的检查清单
 
-- [ ] 只接受 `protocol` 在 `1..=2`；更高版本整份拒绝并记录日志。
+- [ ] 只接受 `protocol == 1`；其他值整份拒绝并记录日志。
 - [ ] 顶层/路由出现未定义字段 → 整份拒绝（严格模式）。
 - [ ] 任一路由非法 → 整份拒绝（不使用半份契约）。
 - [ ] 成功才替换快照；失败保留 last-known-good。
@@ -277,7 +279,7 @@ demo_server 同时提供 `/info`（`version: phase1-fixed`）与 `/info_v2`（`v
 }
 ```
 
-### 9.2 当前 demo 后端实际返回（v1，`unmatched` 默认 deny）
+### 9.2 当前 demo 后端实际返回（`/info`，默认 `deny`）
 
 ```json
 {
@@ -303,7 +305,7 @@ demo_server 同时提供 `/info`（`version: phase1-fixed`）与 `/info_v2`（`v
 | 日期 | 版本 | 变更 |
 | --- | --- | --- |
 | 2026-10-26 | v1 | 落地 `protocol` / `version` / `ttl` / `meta` / `routes[]`；严格路径、方法校验、`404/405/503` 与 `X-Gateway-Reason`；严格模式拒绝未知字段 |
-| 2026-10-26 | v2 | 新增顶层可选 `unmatched`（`deny` 默认 / `forward` 交给后端）；插件接受 `protocol 1..=2`，v1 契约写该字段仍被拒绝 |
+| 2026-10-26 | v1 | 新增顶层可选 `unmatched`（`deny` 默认 / `forward` 交给后端）——开发期仍在 v1，不升版本号 |
 | 计划 | 未排期 | 路由 `priority`（优先级匹配） |
-| 计划 | v3 | `query` / `body` / `headers` 参数校验与 `400/413` |
-| 计划 | v4 | `responses` 覆盖拒绝时的状态码/响应体 |
+| 计划 | 未排期 | `query` / `body` / `headers` 参数校验与 `400/413` |
+| 计划 | 未排期 | `responses` 覆盖拒绝时的状态码/响应体 |

@@ -167,32 +167,32 @@ fi
 req GET "$GATEWAY/passthrough/api/admin/users"
 expect_code "未绑定网关时契约不生效" 200
 
-section "6. 多网关：不同契约源（v1=/info, v2=/info_v2）"
+section "6. 多网关：不同契约源（/info 与 /info_v2）"
 req GET "$GATEWAY/info"
 expect_code "两个网关都放行 /info" 200
-body_has "  /info 响应仍是 v1 契约" 'phase1-fixed'
+body_has "  /info 响应仍是原契约" 'phase1-fixed'
 
 req GET "$GATEWAY/info_v2"
-expect_code "v2 专属接口放行" 200
-body_has "  响应是 v2 契约" '"contract":"v2"'
-body_has "  v2 契约含 /api/metrics" '/api/metrics'
+expect_code "/info_v2 专属接口放行" 200
+body_has "  响应来自 /info_v2 契约" '"contract":"forward-demo"'
+body_has "  契约含 /api/metrics" '/api/metrics'
 
 req GET "$GATEWAY/api/metrics"
-expect_code "v2 声明的接口放行" 200
+expect_code "/info_v2 声明的接口放行" 200
 head_has "  响应来自后端" 'x-demo-backend: 1'
 
 req GET "$GATEWAY/api/reports/2026"
-expect_code "v2 动态路由放行" 200
+expect_code "/info_v2 动态路由放行" 200
 body_has "  路径参数透传" '"year":"2026"'
 
 req POST "$GATEWAY/info"
 expect_code "任一网关拒绝即拒绝" 405
 head_has "  标记第一个拒绝的网关" 'x-gateway-name: myrustwebdemo1'
 
-section "7. 未声明路由策略（v1=deny 默认，v2=forward）"
-# v2 显式 unmatched: "forward"：契约没声明的路径交给后端
+section "7. 未声明路由策略（默认 deny / 显式 forward）"
+# /info_v2 显式 unmatched: "forward"：契约没声明的路径交给后端
 req GET "$GATEWAY/api/user/99"
-expect_code "v2 未声明路由转发到后端" 200
+expect_code "/info_v2 未声明路由转发到后端" 200
 head_has "  响应来自后端" 'x-demo-backend: 1'
 head_lacks "  不是网关拒绝" 'x-gateway-reason'
 body_has "  后端返回真实数据" '"id":"99"'
@@ -202,18 +202,18 @@ expect_code "后端直连同一路径也是 200" 200
 
 # 转发只影响"未声明"；已声明路由的方法校验仍然严格
 req POST "$GATEWAY/api/metrics"
-expect_code "v2 已声明路由方法不符仍 405" 405
+expect_code "/info_v2 已声明路由方法不符仍 405" 405
 head_has "  回写 Allow" 'allow: GET'
 head_has "  标记拒绝的网关" 'x-gateway-name: myrustwebdemo2'
 
-# v1 没写 unmatched → 默认 deny，行为与以前一致
+# /info 没写 unmatched → 默认 deny，行为与以前一致
 req GET "$GATEWAY/api/audit"
-expect_code "v1 未声明仍是 404（默认 deny）" 404
-head_has "  标记拒绝的网关是 v1" 'x-gateway-name: myrustwebdemo1'
+expect_code "/info 未声明仍是 404（默认 deny）" 404
+head_has "  标记拒绝的网关是 myrustwebdemo1（指向 /info）" 'x-gateway-name: myrustwebdemo1'
 head_has "  标记原因" 'x-gateway-reason: route-not-declared'
 
 req GET "$GATEWAY/api/user/42"
-expect_code "v1 已声明路由照常放行" 200
+expect_code "/info 已声明路由照常放行" 200
 
 if grep -q 'gateway: forward GET /api/user/99 (route-not-declared, unmatched=forward) gateway=myrustwebdemo2' "$ROOT/nginx/logs/error.log" 2>/dev/null; then
   ok "日志记录了转发行为"
@@ -221,17 +221,17 @@ else
   bad "日志记录了转发行为" "未找到 'gateway: forward GET /api/user/99 ... gateway=myrustwebdemo2'"
 fi
 
-if grep -q '\[myrustwebdemo2\] contract loaded protocol=2 version=phase1-v2 routes=8 unmatched=forward' "$ROOT/nginx/logs/error.log" 2>/dev/null; then
-  ok "日志记录了 v2 契约的未声明策略"
+if grep -q '\[myrustwebdemo2\] contract loaded protocol=1 version=phase1-forward routes=8 unmatched=forward' "$ROOT/nginx/logs/error.log" 2>/dev/null; then
+  ok "日志记录了 forward 契约的未声明策略"
 else
-  bad "日志记录了 v2 契约的未声明策略" "未找到 protocol=2 ... unmatched=forward"
+  bad "日志记录了 forward 契约的未声明策略" "未找到 unmatched=forward"
 fi
 
 section "8. 日志"
-if grep -q 'contract loaded protocol=1 version=phase1-fixed routes=8' "$ROOT/nginx/logs/error.log" 2>/dev/null; then
+if grep -q 'contract loaded protocol=1 version=phase1-fixed routes=8 unmatched=deny' "$ROOT/nginx/logs/error.log" 2>/dev/null; then
   ok "error_log 记录了契约加载"
 else
-  bad "error_log 记录了契约加载" "未找到 'contract loaded protocol=1 version=phase1-fixed routes=8'"
+  bad "error_log 记录了契约加载" "未找到 'contract loaded protocol=1 version=phase1-fixed routes=8 unmatched=deny'"
 fi
 
 if grep -q '\[myrustwebdemo1\] contract loaded' "$ROOT/nginx/logs/error.log" 2>/dev/null \
@@ -241,10 +241,10 @@ else
   bad "两个网关各自拉取契约" "error_log 缺少 myrustwebdemo1 / myrustwebdemo2 的 contract loaded"
 fi
 
-if grep -q '\[myrustwebdemo2\] contract loaded protocol=2 version=phase1-v2 routes=8 unmatched=forward' "$ROOT/nginx/logs/error.log" 2>/dev/null; then
+if grep -q '\[myrustwebdemo2\] contract loaded protocol=1 version=phase1-forward routes=8 unmatched=forward' "$ROOT/nginx/logs/error.log" 2>/dev/null; then
   ok "demo2 拉到的是 /info_v2 的契约"
 else
-  bad "demo2 拉到的是 /info_v2 的契约" "未找到 '[myrustwebdemo2] contract loaded protocol=2 ... unmatched=forward'"
+  bad "demo2 拉到的是 /info_v2 的契约" "未找到 '[myrustwebdemo2] contract loaded protocol=1 ... unmatched=forward'"
 fi
 
 if grep -q 'refresh started for 2 gateway(s)' "$ROOT/nginx/logs/error.log" 2>/dev/null; then

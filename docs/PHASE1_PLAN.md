@@ -88,7 +88,7 @@ my_gateway/
 | 12 | **1.5**：具名网关 + 后台刷新线程 | 每个被引用的网关一个线程，日志 `[myrustwebdemo1] contract loaded ... routes=8` |
 | 13 | **1.5**：契约判定（404 / 405 + `Allow` / 503 未就绪） | `tests/phase1.sh` 扩到 36 项，全部通过 |
 | 14 | **1.5**：配置模型改为 http 级具名多网关 | `enable_gateway_by` + `X-Gateway-Name`；`tests/phase1.sh` 扩到 49 项 |
-| 15 | **1.5**：demo_server 第二份契约 `GET /info_v2` | `myrustwebdemo2` 指向 v2；新增 4 个差异对照 location；`tests/phase1.sh` 扩到 66 项，原始路径判定后 78 项 |
+| 15 | **1.5**：demo_server 第二份契约 `GET /info_v2` | `myrustwebdemo2` 指向 `/info_v2`；新增 4 个差异对照 location；`tests/phase1.sh` 扩到 66 项，原始路径判定后 78 项 |
 
 ## 5. 关键设计取舍
 

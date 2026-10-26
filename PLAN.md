@@ -45,7 +45,7 @@ my_gateway/
 │   └── PHASE1_PLAN.md         # 阶段 1 计划与验收
 ├── crates/
 │   ├── gateway-core/          # 纯逻辑，可单测，无 unsafe / 无 nginx
-│   │   ├── contract.rs        # 契约 JSON 结构（v1：protocol/version/ttl/meta/routes）
+│   │   ├── contract.rs        # 契约 JSON 结构（v1：protocol/version/ttl/meta/unmatched/routes）
 │   │   ├── gateway.rs         # matchit 路由编译 + 方法判定 + Decision/Outcome
 │   │   └── lib.rs             # 对外导出（Gateway / Decision / Outcome / RequestCtx / ContractError）
 │   └── ngx-gateway/           # cdylib，只做适配
@@ -205,8 +205,8 @@ pub enum Decision {
 
 ## 6. 阶段 5：多维度参数过滤（分三步）
 
-> 字段与语义的权威定义见 [docs/PROTOCOL.md](docs/PROTOCOL.md) 第 5 节（当前为 `protocol 3` 草案）；
-> 本节只记任务拆解。v1 插件是严格模式，草案字段出现即整份拒绝，避免"以为校验了其实没校验"。
+> 字段与语义的权威定义见 [docs/PROTOCOL.md](docs/PROTOCOL.md) 第 5 节（草案，协议仍为 v1）；
+> 本节只记任务拆解。插件是严格模式，草案字段出现即整份拒绝，避免"以为校验了其实没校验"。
 
 原则：每步都是"加一个可选字段 + 加一组校验 + 加一组测试"，不重构。
 

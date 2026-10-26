@@ -4,7 +4,7 @@ use core::fmt;
 
 use matchit::Router;
 
-use crate::contract::{Contract, MIN_PROTOCOL, SUPPORTED_PROTOCOL, SUPPORTED_PROTOCOLS, Unmatched};
+use crate::contract::{Contract, SUPPORTED_PROTOCOL, Unmatched};
 
 /// 契约解析/编译错误。带上是第几条路由，方便定位后端上报的问题。
 #[derive(Debug)]
@@ -12,8 +12,8 @@ pub enum ContractError {
     Json(serde_json::Error),
     UnsupportedProtocol {
         protocol: u32,
-        /// 支持的版本范围，例如 `1..=2`。
-        supported: &'static str,
+        /// 插件支持的版本。
+        supported: u32,
     },
     UnknownField {
         scope: String,
@@ -43,7 +43,7 @@ impl fmt::Display for ContractError {
             ),
             ContractError::UnknownField { scope, name } => write!(
                 f,
-                "unknown field \"{name}\" in {scope}; new fields require a protocol bump (see docs/PROTOCOL.md)"
+                "unknown field \"{name}\" in {scope}; see docs/PROTOCOL.md for the allowed fields"
             ),
             ContractError::InvalidRoute {
                 index,
@@ -124,19 +124,10 @@ impl Gateway {
     pub fn parse(json: &str) -> Result<Self, ContractError> {
         let contract: Contract = serde_json::from_str(json).map_err(ContractError::Json)?;
 
-        if !(MIN_PROTOCOL..=SUPPORTED_PROTOCOL).contains(&contract.protocol) {
+        if contract.protocol != SUPPORTED_PROTOCOL {
             return Err(ContractError::UnsupportedProtocol {
                 protocol: contract.protocol,
-                supported: SUPPORTED_PROTOCOLS,
-            });
-        }
-
-        // 新字段只在对应协议版本里生效：v1 契约写了 `unmatched` 仍按未知字段拒绝，
-        // 避免"后端以为打开了转发、插件其实按旧语义处理"。
-        if contract.unmatched.is_some() && contract.protocol < 2 {
-            return Err(ContractError::UnknownField {
-                scope: "contract".into(),
-                name: "unmatched".into(),
+                supported: SUPPORTED_PROTOCOL,
             });
         }
 

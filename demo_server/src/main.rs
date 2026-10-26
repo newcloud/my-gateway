@@ -94,20 +94,20 @@ async fn info() -> Json<Value> {
     }))
 }
 
-/// 第二份契约：**protocol 2**，指向不同地址，用来验证多网关独立快照与未声明路由策略。
+/// 第二份契约：同样是 protocol 1，指向不同地址，用来验证多网关独立快照与未声明路由策略。
 ///
-/// 与 `/info`（protocol 1，默认 `deny`）的差异：
-/// - **只在 v2**：`/info_v2`、`/api/metrics`、`/api/reports/{year}`
-/// - **只在 v1**：`/api/login`、`/api/user/{id}`、`/api/user/{id}/profile`
+/// 与 `/info` 的差异：
+/// - **只在 `/info_v2`**：`/info_v2`、`/api/metrics`、`/api/reports/{year}`
+/// - **只在 `/info`**：`/api/login`、`/api/user/{id}`、`/api/user/{id}/profile`
 /// - **两边都有**：`/info`、`/api/health`、`/api/products`、`/api/orders`、`/api/echo`
-/// - **策略不同**：v2 写了 `"unmatched": "forward"`，契约没声明的路径交给后端处理（v1 是 404）
+/// - **策略不同**：这份写了 `"unmatched": "forward"`，契约没声明的路径交给后端处理（`/info` 是默认 deny）
 async fn info_v2() -> Json<Value> {
     Json(json!({
-        "protocol": 2,
+        "protocol": 1,
         "unmatched": "forward",
-        "version": "phase1-v2",
+        "version": "phase1-forward",
         "ttl": 30,
-        "meta": { "owner": "demo_server", "generated_by": "handwritten", "contract": "v2" },
+        "meta": { "owner": "demo_server", "generated_by": "handwritten", "contract": "forward-demo" },
         "routes": [
             { "path": "/info_v2",                  "methods": ["GET"] },
             { "path": "/info",                     "methods": ["GET"] },
