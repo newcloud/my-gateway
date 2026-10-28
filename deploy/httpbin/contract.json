@@ -1,0 +1,184 @@
+{
+  "protocol": 1,
+  "version": "httpbin-demo-2",
+  "unmatched": "deny",
+  "responses": {
+    "route_not_declared": { "status": 404, "body": "{\"error\":\"route-denied\"}" },
+    "method_not_allowed": { "status": 405, "body": "{\"error\":\"method-denied\"}" },
+    "missing_parameter": { "status": 400, "body": "{\"error\":\"missing-parameter\"}" },
+    "invalid_parameter": { "status": 400, "body": "{\"error\":\"invalid-parameter\"}" },
+    "unsupported_media_type": { "status": 415, "body": "{\"error\":\"unsupported-media-type\"}" }
+  },
+  "routes": [
+    {
+      "path": "/get",
+      "methods": ["GET"],
+      "query": {
+        "unknown": "reject",
+        "params": {
+          "name": { "required": true, "type": "char", "min_len": 2, "max_len": 64 },
+          "age": { "type": "int", "min": 1, "max": 120 }
+        }
+      },
+      "filters": { "sqli": true, "xss": true }
+    },
+    {
+      "path": "/post",
+      "methods": ["POST"],
+      "body": {
+        "unknown": "reject",
+        "content_types": ["application/json"],
+        "params": {
+          "username": { "required": true, "type": "char", "min_len": 3, "max_len": 32 },
+          "age": { "required": true, "type": "int", "min": 18, "max": 120 },
+          "role": { "type": "enum", "values": ["admin", "user"], "ignore_case": true },
+          "note": {
+            "required_if": { "field": "role", "equals": "admin" },
+            "type": "char",
+            "max_len": 20
+          },
+          "active": { "type": "bool" }
+        }
+      }
+    },
+    {
+      "path": "/headers",
+      "methods": ["GET"],
+      "headers": {
+        "params": {
+          "x-demo-token": { "required": true, "type": "char", "min_len": 8, "max_len": 64 }
+        }
+      }
+    },
+    {
+      "path": "/status/{code}",
+      "methods": ["GET"],
+      "path_params": {
+        "params": {
+          "code": { "type": "int", "min": 200, "max": 299 }
+        }
+      }
+    },
+    { "path": "/anything", "methods": ["GET"] },
+    {
+      "path": "/anything/{slug}",
+      "methods": ["GET"],
+      "path_params": {
+        "params": {
+          "slug": { "type": "char", "regex": "^[a-z]{3}$" }
+        }
+      }
+    },
+    {
+      "path": "/anything/priority/me",
+      "methods": ["GET"]
+    },
+    {
+      "path": "/anything/priority/{id}",
+      "methods": ["GET"],
+      "priority": 10,
+      "path_params": {
+        "params": {
+          "id": { "type": "int", "min": 1, "max": 999 }
+        }
+      }
+    },
+    {
+      "path": "/anything/wild/{*rest}",
+      "methods": ["GET"]
+    },
+    {
+      "path": "/anything/regex/{name}",
+      "methods": ["GET"],
+      "path_regex": "^/anything/regex/[a-z]+$",
+      "path_params": {
+        "params": {
+          "name": { "type": "char", "min_len": 2, "max_len": 16 }
+        }
+      }
+    },
+    {
+      "prefix": "/anything",
+      "methods": ["GET", "POST"],
+      "query": {
+        "params": {
+          "trace": { "type": "char", "min_len": 3, "max_len": 16 }
+        }
+      },
+      "headers": {
+        "params": {
+          "x-group-token": { "type": "char", "max_len": 8 }
+        }
+      },
+      "router": [
+        {
+          "path": "/echo",
+          "methods": ["GET"]
+        },
+        {
+          "prefix": "/items",
+          "path_params": {
+            "params": {
+              "id": { "type": "int", "min": 1, "max": 999 }
+            }
+          },
+          "router": [
+            { "path": "/{id}", "methods": ["GET"] }
+          ]
+        },
+        {
+          "prefix": "/filter",
+          "filters": { "sqli": true, "xss": true },
+          "query": {
+            "params": {
+              "q": { "type": "char", "max_len": 64 }
+            }
+          },
+          "router": [
+            {
+              "path": "/echo",
+              "methods": ["GET"],
+              "filters": { "sqli": false }
+            }
+          ]
+        },
+        {
+          "prefix": "/form",
+          "body": {
+            "unknown": "reject",
+            "params": {
+              "source": { "required": true, "type": "enum", "values": ["web", "api"] },
+              "note": { "type": "char", "max_len": 20 }
+            }
+          },
+          "router": [
+            { "path": "/submit", "methods": ["POST"] }
+          ]
+        }
+      ]
+    },
+    {
+      "prefix": "/anything/rx",
+      "path_regex": "^/anything/rx/(alpha|beta)$",
+      "router": [
+        { "path": "/alpha", "methods": ["GET"] },
+        { "path": "/beta", "methods": ["GET"] },
+        { "path": "/gamma", "methods": ["GET"] }
+      ]
+    },
+    {
+      "prefix": "/anything/admin",
+      "unmatched": "forward",
+      "router": [
+        { "path": "/audit", "methods": ["GET"] },
+        {
+          "prefix": "/closed",
+          "unmatched": "deny",
+          "router": [
+            { "path": "/ping", "methods": ["GET"] }
+          ]
+        }
+      ]
+    }
+  ]
+}

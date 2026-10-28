@@ -35,7 +35,7 @@ cp -f "$ROOT/deploy/nginx.conf" "$ROOT/nginx/conf/nginx.conf"
 ls -l "$ROOT/nginx/modules/libmy_gateway.so"
 echo "==> 模块已就绪：nginx/modules/libmy_gateway.so"
 
-# 运行中的 nginx 已把旧 .so 映射进地址空间；直接覆盖会让模块行为异常（探针/404/405 全部失效）。
+# 运行中的 nginx 已把旧 .so 映射进地址空间；直接覆盖会让模块行为异常（404/405 等判定全部失效）。
 # 这里只提示，不自动重启（可能是生产机）。
 if [ -f "$ROOT/nginx/logs/nginx.pid" ] && kill -0 "$(cat "$ROOT/nginx/logs/nginx.pid")" 2>/dev/null; then
   echo "⚠ nginx 正在运行：请执行 ./scripts/dev.sh restart，否则加载的仍是旧模块" >&2

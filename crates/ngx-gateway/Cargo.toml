@@ -14,8 +14,12 @@ gateway-core = { path = "../gateway-core" }
 # 这套 API 目前只在 git main 上。升级时先看 examples/*.rs 的 diff。
 ngx = { git = "https://github.com/nginx/ngx-rust", rev = "15719544cfaf4322d602b0a8c2a8f85252ac6559", default-features = false, features = ["std"] }
 nginx-sys = { git = "https://github.com/nginx/ngx-rust", rev = "15719544cfaf4322d602b0a8c2a8f85252ac6559" }
-# 只要明文 HTTP，关掉 TLS/gzip，减少依赖与体积
-ureq = { version = "3", default-features = false }
+# 需要 HTTPS 拉取契约：启用 rustls（0.23.43 在本仓库缓存内）。
+# 锁 3.4.x：3.5 要求 rustls ^0.23.46，当前 registry 镜像没有该版本。
+ureq = { version = "=3.4.0", default-features = false, features = ["rustls"] }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [features]
 # 以 cdylib 形式在 nginx 构建体系外编译时，需要导出 ngx_modules 表

@@ -3,7 +3,12 @@
 //! 约束：不依赖 nginx、不做网络/文件 I/O。所有决策都能在 `cargo test` 里跑。
 //! 协议约定（字段、语义、演进规则）见 [`docs/PROTOCOL.md`](../../../docs/PROTOCOL.md)。
 
+mod body;
 mod contract;
 mod gateway;
+mod params;
+mod query;
+mod value;
 
-pub use gateway::{ContractError, Decision, Gateway, Outcome, RequestCtx};
+pub use body::BodyInput;
+pub use gateway::{ContractError, Decision, Gateway, Outcome, RequestCtx, ResponseOverride};
