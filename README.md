@@ -546,3 +546,15 @@ docs/PROGRESS.md           验证记录与已知限制
 - [docs/PRODUCT.md](docs/PRODUCT.md)：产品化方向（内部：定位、竞品、差距与路线图）
 - [PLAN.md](PLAN.md) / [docs/PHASE1_PLAN.md](docs/PHASE1_PLAN.md)：阶段计划
 - [AGENTS.md](AGENTS.md)：开发约定（协议先行、先 core 测试、再接 nginx）
+
+---
+
+## 10. 许可证
+
+[Apache License 2.0](LICENSE)，Copyright 2026 newcloud。
+
+- 仓库内源码（`gateway-core` / `ngx-gateway` / `demo_server` / `scripts` / `tests` / `docs`）均适用该许可证；
+- 本项目以动态模块形式加载进 nginx，**不包含也不分发 nginx 源码**（`nginx/` 由 `scripts/build-nginx.sh`
+  在本机生成，已被 `.gitignore` 忽略）；nginx 自身为 BSD-2-Clause；
+- 若对外分发自带编译 nginx 的二进制包，需一并附带 nginx 的 `LICENSE`（BSD-2-Clause）以及
+  `libinjectionrs`（BSD-3-Clause）等第三方依赖的许可声明。
